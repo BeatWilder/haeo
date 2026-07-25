@@ -1,5 +1,6 @@
 """Data update coordinator for the Home Assistant Energy Optimizer integration."""
 
+from bisect import bisect_right
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -156,6 +157,17 @@ def _localize_currency(unit: str | None, currency_sym: str) -> str | None:
     return unit.replace("$", currency_sym)
 
 
+def _select_forecast_state(
+    values: tuple[Any, ...],
+    forecast_times: tuple[float, ...],
+    now: datetime,
+) -> Any:
+    """Select the step value active at a timezone-aware point in time."""
+    applicable_times = forecast_times[: len(values)]
+    index = bisect_right(applicable_times, now.timestamp()) - 1
+    return values[max(0, index)]
+
+
 def _build_coordinator_output(
     output_name: ElementOutputName,
     output_data: OutputData,
@@ -190,6 +202,8 @@ def _build_coordinator_output(
         state = None
     elif output_data.state_last:
         state = values[-1]
+    elif forecast_times and len(values) > 1:
+        state = _select_forecast_state(values, forecast_times, dt_util.utcnow())
     else:
         state = values[0]
     forecast: list[ForecastPoint] | None = None
