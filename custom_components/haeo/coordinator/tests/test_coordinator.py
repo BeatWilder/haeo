@@ -38,6 +38,7 @@ from custom_components.haeo.coordinator import (
     _localize_currency,
     detect_currency_symbol,
 )
+from custom_components.haeo.coordinator.coordinator import _select_forecast_state
 from custom_components.haeo.core.adapters.elements.battery import BATTERY_DEVICE_BATTERY, BATTERY_POWER_CHARGE
 from custom_components.haeo.core.adapters.elements.connection import CONNECTION_DEVICE_CONNECTION, CONNECTION_POWER
 from custom_components.haeo.core.adapters.elements.grid import GRID_COST_NET, GRID_POWER_MAX_IMPORT_PRICE
@@ -596,6 +597,94 @@ def test_build_coordinator_output_emits_forecast_entries() -> None:
 
     assert output.forecast is not None
     assert [item["value"] for item in output.forecast] == [1.2, 3.4]
+
+
+def test_select_forecast_state_exactly_on_timestamp() -> None:
+    """The value starting exactly at now is active."""
+    now = datetime(2024, 6, 1, 0, 30, tzinfo=UTC)
+    forecast_times = (
+        (now - timedelta(minutes=30)).timestamp(),
+        now.timestamp(),
+        (now + timedelta(minutes=30)).timestamp(),
+    )
+
+    assert _select_forecast_state((1.0, 2.0, 3.0), forecast_times, now) == 2.0
+
+
+def test_select_forecast_state_between_timestamps() -> None:
+    """Step selection keeps the active interval value without interpolation."""
+    now = datetime(2024, 6, 1, 0, 45, tzinfo=UTC)
+    forecast_times = (
+        datetime(2024, 6, 1, 0, 0, tzinfo=UTC).timestamp(),
+        datetime(2024, 6, 1, 0, 30, tzinfo=UTC).timestamp(),
+        datetime(2024, 6, 1, 1, 0, tzinfo=UTC).timestamp(),
+    )
+
+    assert _select_forecast_state((1.0, 2.0, 3.0), forecast_times, now) == 2.0
+
+
+def test_select_forecast_state_before_first_timestamp() -> None:
+    """Times before the plan starts clamp to its first value."""
+    now = datetime(2024, 6, 1, 0, 0, tzinfo=UTC)
+    forecast_times = (
+        (now + timedelta(minutes=30)).timestamp(),
+        (now + timedelta(minutes=60)).timestamp(),
+    )
+
+    assert _select_forecast_state((1.0, 2.0), forecast_times, now) == 1.0
+
+
+def test_select_forecast_state_after_final_interval_timestamp() -> None:
+    """Times after the last applicable timestamp clamp to the final interval value."""
+    now = datetime(2024, 6, 1, 2, 0, tzinfo=UTC)
+    forecast_times = (
+        datetime(2024, 6, 1, 0, 0, tzinfo=UTC).timestamp(),
+        datetime(2024, 6, 1, 0, 30, tzinfo=UTC).timestamp(),
+        datetime(2024, 6, 1, 1, 0, tzinfo=UTC).timestamp(),
+    )
+
+    assert _select_forecast_state((1.0, 2.0), forecast_times, now) == 2.0
+
+
+def test_select_forecast_state_handles_timezone_aware_now() -> None:
+    """Equivalent timezone-aware instants select the same active value."""
+    local_tz = dt_util.get_time_zone("Europe/Amsterdam")
+    assert local_tz is not None
+    now = datetime(2024, 6, 1, 2, 45, tzinfo=local_tz)
+    forecast_times = (
+        datetime(2024, 6, 1, 0, 0, tzinfo=UTC).timestamp(),
+        datetime(2024, 6, 1, 0, 30, tzinfo=UTC).timestamp(),
+        datetime(2024, 6, 1, 1, 0, tzinfo=UTC).timestamp(),
+    )
+
+    assert _select_forecast_state((1.0, 2.0, 3.0), forecast_times, now) == 2.0
+
+
+def test_reoptimization_keeps_current_interval_state_when_first_future_value_changes() -> None:
+    """A changed first future point does not replace the current interval state."""
+    now = datetime(2024, 6, 1, 0, 45, tzinfo=UTC)
+    forecast_times = (
+        datetime(2024, 6, 1, 0, 30, tzinfo=UTC).timestamp(),
+        datetime(2024, 6, 1, 1, 0, tzinfo=UTC).timestamp(),
+        datetime(2024, 6, 1, 1, 30, tzinfo=UTC).timestamp(),
+    )
+
+    with patch("custom_components.haeo.coordinator.coordinator.dt_util.utcnow", return_value=now):
+        original = _build_coordinator_output(
+            SOLAR_POWER,
+            OutputData(type=OutputType.POWER, unit="kW", values=(2.0, 4.0, 5.0)),
+            forecast_times=forecast_times,
+            currency_sym="$",
+        )
+        reoptimized = _build_coordinator_output(
+            SOLAR_POWER,
+            OutputData(type=OutputType.POWER, unit="kW", values=(2.0, 7.0, 8.0)),
+            forecast_times=forecast_times,
+            currency_sym="$",
+        )
+
+    assert original.state == reoptimized.state == 2.0
+    assert original.forecast != reoptimized.forecast
 
 
 def test_build_coordinator_output_handles_timestamp_errors(monkeypatch: pytest.MonkeyPatch) -> None:
