@@ -122,5 +122,23 @@ class BatterySectionAdapter:
 
         return {BATTERY_SECTION_DEVICE: section_outputs}
 
+    def output_metadata(
+        self, **_kwargs: Any
+    ) -> Mapping[BatterySectionDeviceName, Mapping[BatterySectionOutputName, OutputData]]:
+        """Describe battery-section outputs without solved model values."""
+        return {
+            BATTERY_SECTION_DEVICE: {
+                BATTERY_SECTION_POWER_CHARGE: OutputData(OutputType.POWER, "kW", (), direction="-"),
+                BATTERY_SECTION_POWER_DISCHARGE: OutputData(OutputType.POWER, "kW", (), direction="+"),
+                BATTERY_SECTION_POWER_ACTIVE: OutputData(OutputType.POWER, "kW", ()),
+                BATTERY_SECTION_ENERGY_STORED: OutputData(OutputType.ENERGY, "kWh", ()),
+                BATTERY_SECTION_POWER_BALANCE: OutputData(OutputType.SHADOW_PRICE, "$/kWh", ()),
+                BATTERY_SECTION_ENERGY_IN_FLOW: OutputData(OutputType.SHADOW_PRICE, "$/kWh", ()),
+                BATTERY_SECTION_ENERGY_OUT_FLOW: OutputData(OutputType.SHADOW_PRICE, "$/kWh", ()),
+                BATTERY_SECTION_SOC_MAX: OutputData(OutputType.SHADOW_PRICE, "$/kWh", ()),
+                BATTERY_SECTION_SOC_MIN: OutputData(OutputType.SHADOW_PRICE, "$/kWh", ()),
+            }
+        }
+
 
 adapter = BatterySectionAdapter()

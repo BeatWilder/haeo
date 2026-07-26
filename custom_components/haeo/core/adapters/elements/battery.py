@@ -257,6 +257,23 @@ class BatteryAdapter:
 
         return {BATTERY_DEVICE_BATTERY: aggregate_outputs}
 
+    def output_metadata(self, **_kwargs: Any) -> Mapping[BatteryDeviceName, Mapping[BatteryOutputName, OutputData]]:
+        """Describe battery outputs without evaluating an unsolved model."""
+        return {
+            BATTERY_DEVICE_BATTERY: {
+                BATTERY_POWER_CHARGE: OutputData(OutputType.POWER, "kW", (), direction="-"),
+                BATTERY_POWER_DISCHARGE: OutputData(OutputType.POWER, "kW", (), direction="+"),
+                BATTERY_POWER_ACTIVE: OutputData(OutputType.POWER, "kW", ()),
+                BATTERY_ENERGY_STORED: OutputData(OutputType.ENERGY, "kWh", ()),
+                BATTERY_STATE_OF_CHARGE: OutputData(OutputType.STATE_OF_CHARGE, "%", ()),
+                BATTERY_POWER_BALANCE: OutputData(OutputType.SHADOW_PRICE, "$/kWh", ()),
+                BATTERY_ENERGY_IN_FLOW: OutputData(OutputType.SHADOW_PRICE, "$/kWh", (), advanced=True),
+                BATTERY_ENERGY_OUT_FLOW: OutputData(OutputType.SHADOW_PRICE, "$/kWh", (), advanced=True),
+                BATTERY_SOC_MAX: OutputData(OutputType.SHADOW_PRICE, "$/kWh", (), advanced=True),
+                BATTERY_SOC_MIN: OutputData(OutputType.SHADOW_PRICE, "$/kWh", (), advanced=True),
+            }
+        }
+
 
 adapter = BatteryAdapter()
 

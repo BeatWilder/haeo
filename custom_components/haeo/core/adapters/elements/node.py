@@ -6,6 +6,7 @@ from typing import Any, Final, Literal
 from custom_components.haeo.core.adapters.output_utils import expect_output_data
 from custom_components.haeo.core.const import ConnectivityLevel
 from custom_components.haeo.core.model import ModelElementConfig, ModelOutputName, ModelOutputValue
+from custom_components.haeo.core.model.const import OutputType
 from custom_components.haeo.core.model.element import ELEMENT_POWER_BALANCE
 from custom_components.haeo.core.model.elements import MODEL_ELEMENT_TYPE_NODE
 from custom_components.haeo.core.model.output_data import OutputData
@@ -70,6 +71,14 @@ class NodeAdapter:
             node_outputs[NODE_POWER_BALANCE] = expect_output_data(node_model[ELEMENT_POWER_BALANCE])
 
         return {NODE_DEVICE_NODE: node_outputs}
+
+    def output_metadata(self, **_kwargs: Any) -> Mapping[NodeDeviceName, Mapping[NodeOutputName, OutputData]]:
+        """Describe node outputs without solved model values."""
+        return {
+            NODE_DEVICE_NODE: {
+                NODE_POWER_BALANCE: OutputData(OutputType.SHADOW_PRICE, "$/kWh", ()),
+            }
+        }
 
 
 adapter = NodeAdapter()

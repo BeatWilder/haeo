@@ -82,5 +82,9 @@ class PolicyAdapter:
         """Map model outputs to policy-specific output names."""
         return {POLICY_DEVICE_POLICY: {}}
 
+    def output_metadata(self, **_kwargs: Any) -> Mapping[PolicyDeviceName, Mapping[PolicyOutputName, OutputData]]:
+        """Policies currently expose no output entities."""
+        return {POLICY_DEVICE_POLICY: {}}
+
 
 adapter = PolicyAdapter()

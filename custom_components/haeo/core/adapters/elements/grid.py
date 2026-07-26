@@ -191,5 +191,20 @@ class GridAdapter:
 
         return {GRID_DEVICE_GRID: grid_outputs}
 
+    def output_metadata(self, **_kwargs: Any) -> Mapping[GridDeviceName, Mapping[GridOutputName, OutputData]]:
+        """Describe grid outputs without solved model values."""
+        return {
+            GRID_DEVICE_GRID: {
+                GRID_POWER_IMPORT: OutputData(OutputType.POWER, "kW", (), direction="+"),
+                GRID_POWER_EXPORT: OutputData(OutputType.POWER, "kW", (), direction="-"),
+                GRID_POWER_ACTIVE: OutputData(OutputType.POWER, "kW", ()),
+                GRID_COST_IMPORT: OutputData(OutputType.COST, "$", (), direction="-", state_last=True),
+                GRID_REVENUE_EXPORT: OutputData(OutputType.COST, "$", (), direction="+", state_last=True),
+                GRID_COST_NET: OutputData(OutputType.COST, "$", (), state_last=True),
+                GRID_POWER_MAX_IMPORT_PRICE: OutputData(OutputType.SHADOW_PRICE, "$/kWh", ()),
+                GRID_POWER_MAX_EXPORT_PRICE: OutputData(OutputType.SHADOW_PRICE, "$/kWh", ()),
+            }
+        }
+
 
 adapter = GridAdapter()

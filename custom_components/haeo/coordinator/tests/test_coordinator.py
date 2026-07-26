@@ -24,6 +24,7 @@ from custom_components.haeo.const import (
     DOMAIN,
     ELEMENT_TYPE_NETWORK,
     INTEGRATION_TYPE_HUB,
+    OPTIMIZATION_STATUS_FAILED,
     OUTPUT_NAME_HORIZON_LIMIT_REASON,
     OUTPUT_NAME_HORIZON_LIMITED,
     OUTPUT_NAME_LIMITING_INPUT,
@@ -342,14 +343,14 @@ def test_placeholder_plan_inventory_has_unavailable_states(
         hub_config={},
         horizon_start=datetime(2026, 1, 1, tzinfo=UTC),
         participants={
-            "Load": {
+            "Load": {  # pyright: ignore[reportArgumentType]
                 CONF_ELEMENT_TYPE: ElementType.LOAD,
             }
         },
         source_states={},
     )
     adapter = MagicMock()
-    adapter.outputs.return_value = {
+    adapter.output_metadata.return_value = {
         "Load": {
             SOLAR_POWER: OutputData(
                 type=OutputType.POWER,
@@ -369,10 +370,65 @@ def test_placeholder_plan_inventory_has_unavailable_states(
     ):
         outputs = coordinator._placeholder_plan_outputs(context, currency_sym="€")
 
-    placeholder = outputs["Load"]["Load"][SOLAR_POWER]
+    placeholder = outputs["Load"]["Load"][SOLAR_POWER]  # pyright: ignore[reportArgumentType]
     assert placeholder.state is None
     assert placeholder.forecast is None
     assert placeholder.device_class is not None
+    adapter.outputs.assert_not_called()
+
+
+async def test_battery_output_inventory_initializes_without_solved_model_outputs(
+    hass: HomeAssistant,
+    mock_hub_entry: MockConfigEntry,
+    mock_battery_subentry: ConfigSubentry,
+    mock_runtime_data: HaeoRuntimeData,
+) -> None:
+    """The exact startup inventory path must not evaluate battery runtime outputs."""
+    coordinator = HaeoDataUpdateCoordinator(hass, mock_hub_entry)
+    incomplete_battery = MagicMock()
+    incomplete_battery.outputs.return_value = {
+        "battery_power_charge": OutputData(OutputType.POWER, "kW", ()),
+        "battery_power_discharge": OutputData(OutputType.POWER, "kW", ()),
+        "battery_energy_stored": OutputData(OutputType.ENERGY, "kWh", ()),
+    }
+    coordinator.network = MagicMock(
+        elements={"Test Battery": incomplete_battery},
+        periods=np.array([1.0]),
+    )
+    loaded_config = {
+        "Test Battery": {
+            **mock_battery_subentry.data,
+            SECTION_STORAGE: {
+                CONF_CAPACITY: np.array([10.0, 10.0]),
+                CONF_INITIAL_CHARGE_PERCENTAGE: 0.5,
+            },
+        }
+    }
+
+    with (
+        patch.object(coordinator, "_get_participant_configs", return_value=mock_battery_subentry.data),
+        patch.object(coordinator, "_load_from_input_stores", return_value=loaded_config),
+        patch(
+            "custom_components.haeo.coordinator.coordinator._build_optimization_context",
+            return_value=OptimizationContext(
+                hub_config={},
+                horizon_start=datetime(2026, 1, 1, tzinfo=UTC),
+                participants={"Test Battery": mock_battery_subentry.data},  # pyright: ignore[reportArgumentType]
+                source_states={},
+            ),
+        ),
+        patch(
+            "custom_components.haeo.coordinator.coordinator.async_get_translations",
+            new_callable=AsyncMock,
+            return_value={f"component.{DOMAIN}.common.network_subentry_name": "System"},
+        ),
+    ):
+        await coordinator._async_initialize_output_inventory()
+
+    battery_inventory = coordinator.output_inventory["Test Battery"][BATTERY_DEVICE_BATTERY]
+    assert set(battery_inventory) == set(ELEMENT_TYPES[ElementType.BATTERY].output_metadata()["battery"])
+    assert all(output.state is None and output.forecast is None for output in battery_inventory.values())
+    incomplete_battery.outputs.assert_not_called()
 
 
 async def test_output_inventory_is_initialized_when_adaptive_is_disabled(
@@ -403,6 +459,83 @@ async def test_output_inventory_is_initialized_when_adaptive_is_disabled(
         OUTPUT_NAME_OPTIMIZATION_DURATION,
     }
     assert all(output.state is None for output in network_outputs.values())
+
+
+async def test_later_adaptive_failure_preserves_last_successful_plan_values(
+    hass: HomeAssistant,
+    mock_hub_entry: MockConfigEntry,
+    mock_runtime_data: HaeoRuntimeData,
+) -> None:
+    """A later coverage failure updates diagnostics without replacing the last plan."""
+    mock_hub_entry.data[HUB_SECTION_ADVANCED][CONF_ADAPTIVE_HORIZON_ENABLED] = True
+    coordinator = HaeoDataUpdateCoordinator(hass, mock_hub_entry)
+    context = OptimizationContext(
+        hub_config={},
+        horizon_start=datetime(2026, 1, 1, tzinfo=UTC),
+        participants={},
+        source_states={},
+    )
+    real_plan = _build_coordinator_output(
+        BATTERY_POWER_CHARGE,
+        OutputData(OutputType.POWER, "kW", (2.5,)),
+        forecast_times=None,
+        currency_sym="€",
+    )
+    previous_outputs = {
+        "Battery": {BATTERY_DEVICE_BATTERY: {BATTERY_POWER_CHARGE: real_plan}},
+        "System": {
+            ELEMENT_TYPE_NETWORK: {
+                OUTPUT_NAME_OPTIMIZATION_STATUS: _build_coordinator_output(
+                    OUTPUT_NAME_OPTIMIZATION_STATUS,
+                    OutputData(OutputType.STATUS, None, ("success",)),
+                    forecast_times=None,
+                    currency_sym="€",
+                )
+            }
+        },
+    }
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    coordinator.data = CoordinatorData(
+        context,
+        previous_outputs,  # pyright: ignore[reportArgumentType]
+        now,
+        now,
+    )
+    analysis = EffectiveHorizon(
+        configured_start=now,
+        configured_end=now + timedelta(hours=2),
+        effective_end=now,
+        limiting_input="sensor.forecast",
+        reason=CoverageIssue.EARLY_END,
+        limiting_input_end=now,
+        coverage_ratio=0.0,
+        inputs=(),
+    )
+
+    with (
+        patch(
+            "custom_components.haeo.coordinator.coordinator._build_optimization_context",
+            return_value=context,
+        ),
+        patch.object(
+            coordinator,
+            "_prepare_adaptive_horizon",
+            new_callable=AsyncMock,
+            side_effect=AdaptiveHorizonError(analysis, CoverageIssue.EARLY_END),
+        ),
+        patch(
+            "custom_components.haeo.coordinator.coordinator.async_get_translations",
+            new_callable=AsyncMock,
+            return_value={f"component.{DOMAIN}.common.network_subentry_name": "System"},
+        ),
+    ):
+        result = await coordinator._async_update_data()
+
+    assert result.outputs["Battery"][BATTERY_DEVICE_BATTERY][BATTERY_POWER_CHARGE] == real_plan
+    assert (
+        result.outputs["System"][ELEMENT_TYPE_NETWORK][OUTPUT_NAME_OPTIMIZATION_STATUS].state
+        == OPTIMIZATION_STATUS_FAILED
+    )
 
 
 async def test_adaptive_horizon_rebuilds_for_shrink_and_growth(
@@ -1024,7 +1157,7 @@ def test_adaptive_string_diagnostics_are_not_enums(
 ) -> None:
     """Variable adaptive diagnostic states never receive enum metadata."""
     output = _build_coordinator_output(
-        output_name,
+        output_name,  # pyright: ignore[reportArgumentType]
         OutputData(type=OutputType.STATUS, unit=None, values=(state,)),
         forecast_times=None,
         currency_sym="$",

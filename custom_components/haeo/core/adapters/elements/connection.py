@@ -6,6 +6,7 @@ from typing import Any, Final, Literal
 from custom_components.haeo.core.adapters.output_utils import expect_output_data
 from custom_components.haeo.core.const import ConnectivityLevel
 from custom_components.haeo.core.model import ModelElementConfig, ModelOutputName, ModelOutputValue
+from custom_components.haeo.core.model.const import OutputType
 from custom_components.haeo.core.model.elements import MODEL_ELEMENT_TYPE_CONNECTION
 from custom_components.haeo.core.model.elements.connection import CONNECTION_POWER
 from custom_components.haeo.core.model.output_data import OutputData
@@ -77,6 +78,16 @@ class ConnectionAdapter:
         return {
             CONNECTION_DEVICE_CONNECTION: {
                 CONNECTION_POWER: expect_output_data(conn[CONNECTION_POWER]),
+            }
+        }
+
+    def output_metadata(
+        self, **_kwargs: Any
+    ) -> Mapping[ConnectionDeviceName, Mapping[ConnectionOutputName, OutputData]]:
+        """Describe connection outputs without solved model values."""
+        return {
+            CONNECTION_DEVICE_CONNECTION: {
+                CONNECTION_POWER: OutputData(OutputType.POWER_FLOW, "kW", (), direction="+"),
             }
         }
 

@@ -242,7 +242,7 @@ def _build_coordinator_output(
     elif forecast_times and len(values) > 1:
         state = _select_forecast_state(values, forecast_times, dt_util.utcnow())
     else:
-        state = values[0]
+        state = values[0]  # pyright: ignore[reportGeneralTypeIssues]
     forecast: list[ForecastPoint] | None = None
 
     if forecast_times and len(values) > 1:
@@ -999,16 +999,11 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
         same entity IDs after either first-run success or first-run failure.
         """
         loaded_configs = self._load_from_input_stores()
-        model_outputs: dict[str, Mapping[ModelOutputName, OutputData]] = {
-            element_name: element.outputs() for element_name, element in self.network.elements.items()
-        }
-
         outputs: dict[str, SubentryDevices] = {}
         for element_name, element_config in context.participants.items():
             element_type = element_config[CONF_ELEMENT_TYPE]
-            adapter_outputs = ELEMENT_TYPES[element_type].outputs(
+            adapter_outputs = ELEMENT_TYPES[element_type].output_metadata(
                 name=element_name,
-                model_outputs=model_outputs,
                 config=loaded_configs[element_name],
                 periods=self.network.periods,
             )
@@ -1109,11 +1104,13 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
                         context.source_states,
                         fallback_currency=self.hass.config.currency,
                     )
-                    failure_outputs = {
+                    previous_data: Any = self.data
+                    stable_outputs = previous_data.outputs if previous_data is not None else self.output_inventory
+                    failure_outputs: dict[str, SubentryDevices] = {
                         subentry_name: {
                             device_name: dict(device_outputs) for device_name, device_outputs in devices.items()
                         }
-                        for subentry_name, devices in self.output_inventory.items()
+                        for subentry_name, devices in stable_outputs.items()
                     }
                     if not failure_outputs:
                         # Tests and third-party callers may invoke refresh without

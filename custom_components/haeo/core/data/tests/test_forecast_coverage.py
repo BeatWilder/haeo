@@ -176,6 +176,14 @@ class _State:
         self.state = state
         self.attributes = attributes
 
+    def as_dict(self) -> dict[str, object]:
+        """Return the state shape required by the EntityState protocol."""
+        return {
+            "entity_id": self.entity_id,
+            "state": self.state,
+            "attributes": self.attributes,
+        }
+
 
 def test_scalar_state_is_ignored() -> None:
     """A scalar entity is not promoted to a required forecast."""

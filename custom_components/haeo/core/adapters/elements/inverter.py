@@ -164,5 +164,18 @@ class InverterAdapter:
 
         return {INVERTER_DEVICE_INVERTER: inverter_outputs}
 
+    def output_metadata(self, **_kwargs: Any) -> Mapping[InverterDeviceName, Mapping[InverterOutputName, OutputData]]:
+        """Describe inverter outputs without solved model values."""
+        return {
+            INVERTER_DEVICE_INVERTER: {
+                INVERTER_POWER_DC_TO_AC: OutputData(OutputType.POWER_FLOW, "kW", (), direction="+"),
+                INVERTER_POWER_AC_TO_DC: OutputData(OutputType.POWER_FLOW, "kW", (), direction="-"),
+                INVERTER_POWER_ACTIVE: OutputData(OutputType.POWER_FLOW, "kW", ()),
+                INVERTER_DC_BUS_POWER_BALANCE: OutputData(OutputType.SHADOW_PRICE, "$/kWh", ()),
+                INVERTER_MAX_POWER_DC_TO_AC_PRICE: OutputData(OutputType.SHADOW_PRICE, "$/kWh", ()),
+                INVERTER_MAX_POWER_AC_TO_DC_PRICE: OutputData(OutputType.SHADOW_PRICE, "$/kWh", ()),
+            }
+        }
+
 
 adapter = InverterAdapter()

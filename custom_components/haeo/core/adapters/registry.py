@@ -50,6 +50,13 @@ class ElementAdapter(Protocol):
         """Map model outputs to device-specific outputs."""
         ...
 
+    def output_metadata(
+        self,
+        **_kwargs: Any,
+    ) -> Mapping[Any, Mapping[Any, OutputData]]:
+        """Describe configured outputs without requiring solved model values."""
+        ...
+
 
 ELEMENT_TYPES: dict[ElementType, ElementAdapter] = {
     ElementType.GRID: grid_adapter,

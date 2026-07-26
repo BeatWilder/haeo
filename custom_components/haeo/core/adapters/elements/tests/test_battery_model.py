@@ -509,3 +509,23 @@ def test_outputs_mapping(case: OutputsCase) -> None:
     entry = ELEMENT_TYPES[ElementType.BATTERY]
     result = entry.outputs(case["name"], case["model_outputs"], config=case["data"])
     assert result == case["outputs"]
+    metadata = entry.output_metadata(name=case["name"], config=case["data"])
+    assert set(metadata) == set(result)
+    assert set(metadata[BATTERY_DEVICE_BATTERY]) == set(result[BATTERY_DEVICE_BATTERY])
+    for output_name, output in result[BATTERY_DEVICE_BATTERY].items():
+        described = metadata[BATTERY_DEVICE_BATTERY][output_name]
+        assert (
+            described.type,
+            described.unit,
+            described.direction,
+            described.advanced,
+            described.state_last,
+            described.fixed,
+        ) == (
+            output.type,
+            output.unit,
+            output.direction,
+            output.advanced,
+            output.state_last,
+            output.fixed,
+        )

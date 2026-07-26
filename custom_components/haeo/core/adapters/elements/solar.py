@@ -110,5 +110,17 @@ class SolarAdapter:
 
         return {SOLAR_DEVICE_SOLAR: solar_outputs}
 
+    def output_metadata(
+        self, *, config: SolarConfigData, **_kwargs: Any
+    ) -> Mapping[SolarDeviceName, Mapping[SolarOutputName, OutputData]]:
+        """Describe solar outputs without solved model values."""
+        fixed = not config[SECTION_CURTAILMENT].get(CONF_CURTAILMENT, True)
+        return {
+            SOLAR_DEVICE_SOLAR: {
+                SOLAR_POWER: OutputData(OutputType.POWER, "kW", (), direction="+", fixed=fixed),
+                SOLAR_FORECAST_LIMIT: OutputData(OutputType.SHADOW_PRICE, "$/kWh", ()),
+            }
+        }
+
 
 adapter = SolarAdapter()

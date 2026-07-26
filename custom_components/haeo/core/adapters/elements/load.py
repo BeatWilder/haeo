@@ -112,5 +112,17 @@ class LoadAdapter:
 
         return {LOAD_DEVICE_LOAD: load_outputs}
 
+    def output_metadata(
+        self, *, config: LoadConfigData, **_kwargs: Any
+    ) -> Mapping[LoadDeviceName, Mapping[LoadOutputName, OutputData]]:
+        """Describe load outputs without solved model values."""
+        fixed = not config[SECTION_CURTAILMENT].get(CONF_CURTAILMENT, False)
+        return {
+            LOAD_DEVICE_LOAD: {
+                LOAD_POWER: OutputData(OutputType.POWER, "kW", (), direction="-", fixed=fixed),
+                LOAD_FORECAST_LIMIT_PRICE: OutputData(OutputType.SHADOW_PRICE, "$/kWh", ()),
+            }
+        }
+
 
 adapter = LoadAdapter()
