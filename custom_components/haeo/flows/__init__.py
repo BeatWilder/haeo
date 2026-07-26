@@ -21,10 +21,13 @@ import voluptuous as vol
 
 from custom_components.haeo.const import CONF_RECORD_FORECASTS
 from custom_components.haeo.core.const import (
+    CONF_ADAPTIVE_HORIZON_ENABLED,
     CONF_ADVANCED_MODE,
     CONF_DEBOUNCE_SECONDS,
     CONF_HORIZON_PRESET,
+    CONF_MINIMUM_EFFECTIVE_HORIZON_MINUTES,
     CONF_NAME,
+    CONF_REQUIRED_FORECAST_COVERAGE_RATIO,
     CONF_TIER_1_COUNT,
     CONF_TIER_1_DURATION,
     CONF_TIER_2_COUNT,
@@ -33,7 +36,10 @@ from custom_components.haeo.core.const import (
     CONF_TIER_3_DURATION,
     CONF_TIER_4_COUNT,
     CONF_TIER_4_DURATION,
+    DEFAULT_ADAPTIVE_HORIZON_ENABLED,
     DEFAULT_DEBOUNCE_SECONDS,
+    DEFAULT_MINIMUM_EFFECTIVE_HORIZON_MINUTES,
+    DEFAULT_REQUIRED_FORECAST_COVERAGE_RATIO,
     DEFAULT_TIER_1_COUNT,
     DEFAULT_TIER_1_DURATION,
     DEFAULT_TIER_2_COUNT,
@@ -155,7 +161,12 @@ def get_hub_setup_schema(suggested_name: str | None = None) -> vol.Schema:
         ),
         SectionDefinition(
             key=HUB_SECTION_ADVANCED,
-            fields=(CONF_ADVANCED_MODE,),
+            fields=(
+                CONF_ADVANCED_MODE,
+                CONF_ADAPTIVE_HORIZON_ENABLED,
+                CONF_MINIMUM_EFFECTIVE_HORIZON_MINUTES,
+                CONF_REQUIRED_FORECAST_COVERAGE_RATIO,
+            ),
             collapsed=True,
         ),
     )
@@ -185,6 +196,30 @@ def get_hub_setup_schema(suggested_name: str | None = None) -> vol.Schema:
             CONF_ADVANCED_MODE: (
                 vol.Required(CONF_ADVANCED_MODE, default=False),
                 bool,
+            ),
+            CONF_ADAPTIVE_HORIZON_ENABLED: (
+                vol.Required(CONF_ADAPTIVE_HORIZON_ENABLED, default=DEFAULT_ADAPTIVE_HORIZON_ENABLED),
+                bool,
+            ),
+            CONF_MINIMUM_EFFECTIVE_HORIZON_MINUTES: (
+                vol.Required(
+                    CONF_MINIMUM_EFFECTIVE_HORIZON_MINUTES,
+                    default=DEFAULT_MINIMUM_EFFECTIVE_HORIZON_MINUTES,
+                ),
+                vol.All(
+                    NumberSelector(NumberSelectorConfig(min=1, max=10080, step=1, mode=NumberSelectorMode.BOX)),
+                    vol.Coerce(int),
+                ),
+            ),
+            CONF_REQUIRED_FORECAST_COVERAGE_RATIO: (
+                vol.Required(
+                    CONF_REQUIRED_FORECAST_COVERAGE_RATIO,
+                    default=DEFAULT_REQUIRED_FORECAST_COVERAGE_RATIO,
+                ),
+                vol.All(
+                    NumberSelector(NumberSelectorConfig(min=0, max=1, step=0.01, mode=NumberSelectorMode.BOX)),
+                    vol.Coerce(float),
+                ),
             ),
         },
     }
@@ -291,7 +326,14 @@ def get_hub_options_schema(config_entry: ConfigEntry) -> vol.Schema:
         ),
         SectionDefinition(
             key=HUB_SECTION_ADVANCED,
-            fields=(CONF_DEBOUNCE_SECONDS, CONF_ADVANCED_MODE, CONF_RECORD_FORECASTS),
+            fields=(
+                CONF_DEBOUNCE_SECONDS,
+                CONF_ADVANCED_MODE,
+                CONF_RECORD_FORECASTS,
+                CONF_ADAPTIVE_HORIZON_ENABLED,
+                CONF_MINIMUM_EFFECTIVE_HORIZON_MINUTES,
+                CONF_REQUIRED_FORECAST_COVERAGE_RATIO,
+            ),
             collapsed=True,
         ),
     )
@@ -334,6 +376,42 @@ def get_hub_options_schema(config_entry: ConfigEntry) -> vol.Schema:
                     default=config_entry.data.get(CONF_RECORD_FORECASTS, False),
                 ),
                 bool,
+            ),
+            CONF_ADAPTIVE_HORIZON_ENABLED: (
+                vol.Required(
+                    CONF_ADAPTIVE_HORIZON_ENABLED,
+                    default=advanced_data.get(
+                        CONF_ADAPTIVE_HORIZON_ENABLED,
+                        DEFAULT_ADAPTIVE_HORIZON_ENABLED,
+                    ),
+                ),
+                bool,
+            ),
+            CONF_MINIMUM_EFFECTIVE_HORIZON_MINUTES: (
+                vol.Required(
+                    CONF_MINIMUM_EFFECTIVE_HORIZON_MINUTES,
+                    default=advanced_data.get(
+                        CONF_MINIMUM_EFFECTIVE_HORIZON_MINUTES,
+                        DEFAULT_MINIMUM_EFFECTIVE_HORIZON_MINUTES,
+                    ),
+                ),
+                vol.All(
+                    NumberSelector(NumberSelectorConfig(min=1, max=10080, step=1, mode=NumberSelectorMode.BOX)),
+                    vol.Coerce(int),
+                ),
+            ),
+            CONF_REQUIRED_FORECAST_COVERAGE_RATIO: (
+                vol.Required(
+                    CONF_REQUIRED_FORECAST_COVERAGE_RATIO,
+                    default=advanced_data.get(
+                        CONF_REQUIRED_FORECAST_COVERAGE_RATIO,
+                        DEFAULT_REQUIRED_FORECAST_COVERAGE_RATIO,
+                    ),
+                ),
+                vol.All(
+                    NumberSelector(NumberSelectorConfig(min=0, max=1, step=0.01, mode=NumberSelectorMode.BOX)),
+                    vol.Coerce(float),
+                ),
             ),
         },
     }

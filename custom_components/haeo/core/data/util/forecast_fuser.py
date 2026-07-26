@@ -1,6 +1,7 @@
 """Fuse combined forecast data into horizon-aligned values."""
 
 from collections.abc import Sequence
+from itertools import pairwise
 from typing import Any
 
 import numpy as np
@@ -36,6 +37,45 @@ def _build_extended_block(
     repeat_count = max(2, int(np.ceil((horizon_end - horizon_start) / cover_seconds)) + 1)
     extended = [(timestamp + i * cover_seconds, value) for i in range(repeat_count) for (timestamp, value) in block]
     return np.array(extended, dtype=[("timestamp", np.float64), ("value", np.float64)])
+
+
+def _build_strict_block(
+    forecast_series: ForecastSeries,
+    horizon_start: float,
+    horizon_end: float,
+    *,
+    interval_starts: bool = False,
+    allow_single_interval: bool = False,
+) -> NDArray[Any]:
+    """Build a source block only when it naturally covers the horizon."""
+    block = np.array(forecast_series, dtype=[("timestamp", np.float64), ("value", np.float64)])
+    if block.size == 0 or block[0]["timestamp"] > horizon_start:
+        msg = "Forecast does not continuously cover the requested horizon"
+        raise ValueError(msg)
+    if block.size == 1:
+        if not interval_starts or not allow_single_interval or block[0]["timestamp"] != horizon_start:
+            msg = "Forecast does not continuously cover the requested horizon"
+            raise ValueError(msg)
+        # Adaptive coverage only permits a one-point interval series when its
+        # explicit final boundary has already limited ``horizon_end``.
+        return np.append(
+            block,
+            np.array([(horizon_end, block[0]["value"])], dtype=block.dtype),
+        )
+    if interval_starts and block[-1]["timestamp"] < horizon_end:
+        # Coverage validation has already established that the final local
+        # cadence is unambiguous. Do not use a broad/global median here because
+        # a supported sustained resolution transition may precede the final run.
+        cadence = float(block[-1]["timestamp"] - block[-2]["timestamp"])
+        natural_end = float(block[-1]["timestamp"]) + cadence
+        if cadence <= 0 or natural_end < horizon_end:
+            msg = "Forecast does not continuously cover the requested horizon"
+            raise ValueError(msg)
+        block = np.append(block, np.array([(natural_end, block[-1]["value"])], dtype=block.dtype))
+    elif block[-1]["timestamp"] < horizon_end:
+        msg = "Forecast does not continuously cover the requested horizon"
+        raise ValueError(msg)
+    return block
 
 
 def fuse_to_boundaries(
@@ -75,6 +115,24 @@ def fuse_to_boundaries(
 
     # Replace position 0 with present_value if provided
     result = [float(v) for v in values]
+    if present_value is not None:
+        result[0] = present_value
+    return result
+
+
+def fuse_to_boundaries_strict(
+    present_value: float | None,
+    forecast_series: ForecastSeries,
+    horizon_times: Sequence[float],
+) -> list[float]:
+    """Fuse boundary values without cycling or extrapolating source data."""
+    if not horizon_times:
+        return []
+    if not forecast_series:
+        msg = "A forecast series is required for strict horizon fusion"
+        raise ValueError(msg)
+    block = _build_strict_block(forecast_series, horizon_times[0], horizon_times[-1])
+    result = [float(value) for value in np.interp(horizon_times, block["timestamp"], block["value"])]
     if present_value is not None:
         result[0] = present_value
     return result
@@ -143,4 +201,87 @@ def fuse_to_intervals(
     if present_value is not None:
         result[0] = present_value
 
+    return result
+
+
+def fuse_to_intervals_strict(
+    present_value: float | None,
+    forecast_series: ForecastSeries,
+    horizon_times: Sequence[float],
+    *,
+    allow_single_interval: bool = False,
+    interval_boundaries: Sequence[float] | None = None,
+) -> list[float]:
+    """Fuse interval averages without cycling or extrapolating source data."""
+    if not horizon_times or len(horizon_times) < MIN_BOUNDARIES:
+        return []
+    if not forecast_series:
+        msg = "A forecast series is required for strict horizon fusion"
+        raise ValueError(msg)
+
+    if interval_boundaries is not None:
+        boundaries = [float(timestamp) for timestamp in interval_boundaries]
+        if len(boundaries) != len(forecast_series) + 1:
+            msg = "Explicit interval boundaries must contain N+1 timestamps for N values"
+            raise ValueError(msg)
+        starts = [float(timestamp) for timestamp, _value in forecast_series]
+        if any(current <= previous for previous, current in pairwise(boundaries)) or any(
+            not np.isclose(start, boundary, rtol=0.0, atol=1e-6)
+            for start, boundary in zip(starts, boundaries[:-1], strict=True)
+        ):
+            msg = "Explicit interval boundaries do not match forecast interval starts"
+            raise ValueError(msg)
+        if (
+            horizon_times[0] < boundaries[0]
+            or horizon_times[0] >= boundaries[-1]
+            or not any(np.isclose(horizon_times[-1], boundary, rtol=0.0, atol=1e-6) for boundary in boundaries)
+            or horizon_times[-1] > boundaries[-1]
+        ):
+            msg = "Requested horizon must start within coverage and end on an explicit interval boundary"
+            raise ValueError(msg)
+
+        source_values = [float(value) for _timestamp, value in forecast_series]
+        result: list[float] = []
+        for interval_start, interval_end in pairwise(horizon_times):
+            duration = interval_end - interval_start
+            if duration <= 0:
+                msg = "Requested horizon boundaries must be strictly increasing"
+                raise ValueError(msg)
+            weighted_total = 0.0
+            covered = 0.0
+            for source_start, source_end, source_value in zip(
+                boundaries[:-1],
+                boundaries[1:],
+                source_values,
+                strict=True,
+            ):
+                overlap = max(0.0, min(interval_end, source_end) - max(interval_start, source_start))
+                weighted_total += overlap * source_value
+                covered += overlap
+            if not np.isclose(covered, duration, rtol=0.0, atol=1e-6):
+                msg = "Explicit interval boundaries do not continuously cover the requested horizon"
+                raise ValueError(msg)
+            result.append(weighted_total / duration)
+        if present_value is not None:
+            result[0] = present_value
+        return result
+
+    block = _build_strict_block(
+        forecast_series,
+        horizon_times[0],
+        horizon_times[-1],
+        interval_starts=True,
+        allow_single_interval=allow_single_interval,
+    )
+    result: list[float] = []
+    for interval_start, interval_end in pairwise(horizon_times):
+        mask = (block["timestamp"] > interval_start) & (block["timestamp"] < interval_end)
+        interval_points = block[mask]
+        start_value = np.interp(interval_start, block["timestamp"], block["value"])
+        end_value = np.interp(interval_end, block["timestamp"], block["value"])
+        times = np.concatenate([[interval_start], interval_points["timestamp"], [interval_end]])
+        values = np.concatenate([[start_value], interval_points["value"], [end_value]])
+        result.append(float(np.trapezoid(values, times) / (interval_end - interval_start)))
+    if present_value is not None:
+        result[0] = present_value
     return result

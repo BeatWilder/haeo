@@ -10,6 +10,9 @@ CONF_NAME: Final = "name"
 CONF_DEBOUNCE_SECONDS: Final = "debounce_seconds"
 CONF_HORIZON_PRESET: Final = "horizon_preset"
 CONF_ADVANCED_MODE: Final = "advanced_mode"
+CONF_ADAPTIVE_HORIZON_ENABLED: Final = "adaptive_horizon_enabled"
+CONF_MINIMUM_EFFECTIVE_HORIZON_MINUTES: Final = "minimum_effective_horizon_minutes"
+CONF_REQUIRED_FORECAST_COVERAGE_RATIO: Final = "required_forecast_coverage_ratio"
 
 # Interval tier configuration (4 tiers with count and duration each)
 # Each tier specifies: count = number of intervals, duration = minutes per interval
@@ -38,6 +41,9 @@ DEFAULT_TIER_4_COUNT: Final = 48
 DEFAULT_TIER_4_DURATION: Final = 60
 
 DEFAULT_DEBOUNCE_SECONDS: Final = 2  # 2 seconds debounce window
+DEFAULT_ADAPTIVE_HORIZON_ENABLED: Final = False
+DEFAULT_MINIMUM_EFFECTIVE_HORIZON_MINUTES: Final = 360
+DEFAULT_REQUIRED_FORECAST_COVERAGE_RATIO: Final = 1.0
 
 # Hub section keys
 HUB_SECTION_COMMON: Final = "common"

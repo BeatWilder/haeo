@@ -7,7 +7,14 @@ from homeassistant import config_entries
 from homeassistant.config_entries import ConfigFlowResult
 
 from custom_components.haeo.const import CONF_RECORD_FORECASTS
-from custom_components.haeo.core.const import CONF_ADVANCED_MODE, CONF_DEBOUNCE_SECONDS, CONF_HORIZON_PRESET
+from custom_components.haeo.core.const import (
+    CONF_ADAPTIVE_HORIZON_ENABLED,
+    CONF_ADVANCED_MODE,
+    CONF_DEBOUNCE_SECONDS,
+    CONF_HORIZON_PRESET,
+    CONF_MINIMUM_EFFECTIVE_HORIZON_MINUTES,
+    CONF_REQUIRED_FORECAST_COVERAGE_RATIO,
+)
 
 from . import (
     HORIZON_PRESET_CUSTOM,
@@ -77,6 +84,13 @@ class HubOptionsFlow(config_entries.OptionsFlow):
                 **self.config_entry.data.get(HUB_SECTION_ADVANCED, {}),
                 CONF_DEBOUNCE_SECONDS: self._user_input[HUB_SECTION_ADVANCED][CONF_DEBOUNCE_SECONDS],
                 CONF_ADVANCED_MODE: self._user_input[HUB_SECTION_ADVANCED][CONF_ADVANCED_MODE],
+                CONF_ADAPTIVE_HORIZON_ENABLED: self._user_input[HUB_SECTION_ADVANCED][CONF_ADAPTIVE_HORIZON_ENABLED],
+                CONF_MINIMUM_EFFECTIVE_HORIZON_MINUTES: self._user_input[HUB_SECTION_ADVANCED][
+                    CONF_MINIMUM_EFFECTIVE_HORIZON_MINUTES
+                ],
+                CONF_REQUIRED_FORECAST_COVERAGE_RATIO: self._user_input[HUB_SECTION_ADVANCED][
+                    CONF_REQUIRED_FORECAST_COVERAGE_RATIO
+                ],
             },
             CONF_RECORD_FORECASTS: self._user_input[HUB_SECTION_ADVANCED].get(CONF_RECORD_FORECASTS, False),
         }

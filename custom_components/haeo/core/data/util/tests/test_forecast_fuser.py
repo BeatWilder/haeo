@@ -17,7 +17,12 @@ Tests use simple integer timestamps to avoid datetime complexity.
 import numpy as np
 import pytest
 
-from custom_components.haeo.core.data.util.forecast_fuser import fuse_to_boundaries, fuse_to_intervals
+from custom_components.haeo.core.data.util.forecast_fuser import (
+    fuse_to_boundaries,
+    fuse_to_boundaries_strict,
+    fuse_to_intervals,
+    fuse_to_intervals_strict,
+)
 
 
 @pytest.mark.parametrize(
@@ -253,3 +258,130 @@ def test_fuse_to_boundaries_raises_when_no_data() -> None:
     """Test that missing both forecast_series and present_value raises ValueError."""
     with pytest.raises(ValueError, match="Either forecast_series or present_value must be provided"):
         fuse_to_boundaries(None, [], [0, 1000, 2000])
+
+
+def test_strict_intervals_accept_n_start_timestamps() -> None:
+    """N interval starts cover N natural cadence intervals without cycling."""
+    series = [(0.0, 1.0), (3600.0, 2.0), (7200.0, 3.0)]
+    assert len(fuse_to_intervals_strict(None, series, [0.0, 3600.0, 7200.0, 10800.0])) == 3
+
+
+def test_strict_boundaries_accept_n_plus_one_timestamps() -> None:
+    """N+1 boundary timestamps cover N requested intervals."""
+    series = [(0.0, 1.0), (3600.0, 2.0), (7200.0, 3.0), (10800.0, 4.0)]
+    assert fuse_to_boundaries_strict(None, series, [0.0, 3600.0, 7200.0, 10800.0]) == [
+        1.0,
+        2.0,
+        3.0,
+        4.0,
+    ]
+
+
+def test_strict_fusion_refuses_to_repeat_short_forecast() -> None:
+    """Strict adaptive fusion never invokes legacy cycling."""
+    series = [(0.0, 1.0), (3600.0, 2.0)]
+    with pytest.raises(ValueError, match="continuously cover"):
+        fuse_to_intervals_strict(None, series, [0.0, 3600.0, 7200.0, 10800.0])
+
+
+def test_strict_single_interval_requires_explicit_validation() -> None:
+    """A one-point source is accepted only after coverage validated its end."""
+    series = [(0.0, 2.0)]
+    with pytest.raises(ValueError, match="continuously cover"):
+        fuse_to_intervals_strict(None, series, [0.0, 900.0])
+
+    assert fuse_to_intervals_strict(
+        None,
+        series,
+        [0.0, 900.0],
+        allow_single_interval=True,
+    ) == [2.0]
+
+
+def test_strict_interval_fusion_preserves_one_explicit_interval() -> None:
+    """One value with two explicit boundaries remains one interval."""
+    assert fuse_to_intervals_strict(
+        None,
+        [(0.0, 2.0)],
+        [0.0, 900.0],
+        interval_boundaries=[0.0, 900.0],
+    ) == [2.0]
+
+
+def test_strict_interval_fusion_uses_irregular_explicit_final_boundary() -> None:
+    """The final explicit boundary is authoritative over inferred cadence."""
+    assert fuse_to_intervals_strict(
+        None,
+        [(0.0, 1.0), (3600.0, 2.0), (7200.0, 3.0)],
+        [0.0, 3600.0, 7200.0, 9000.0],
+        interval_boundaries=[0.0, 3600.0, 7200.0, 9000.0],
+    ) == [1.0, 2.0, 3.0]
+
+    with pytest.raises(ValueError, match="within coverage"):
+        fuse_to_intervals_strict(
+            None,
+            [(0.0, 1.0), (3600.0, 2.0), (7200.0, 3.0)],
+            [0.0, 3600.0, 7200.0, 10800.0],
+            interval_boundaries=[0.0, 3600.0, 7200.0, 9000.0],
+        )
+
+
+def test_strict_interval_fusion_clips_only_on_explicit_boundary() -> None:
+    """A shortened horizon ends on an explicit source boundary."""
+    assert fuse_to_intervals_strict(
+        None,
+        [(0.0, 1.0), (1800.0, 3.0), (3600.0, 5.0)],
+        [0.0, 3600.0],
+        interval_boundaries=[0.0, 1800.0, 3600.0, 5400.0],
+    ) == [2.0]
+
+
+def test_strict_interval_fusion_allows_start_inside_source_interval() -> None:
+    """A partial first source interval is covered by weighted overlap."""
+    assert fuse_to_intervals_strict(
+        None,
+        [(0.0, 10.0), (3600.0, 20.0), (7200.0, 30.0)],
+        [900.0, 1800.0, 3600.0, 7200.0],
+        interval_boundaries=[0.0, 3600.0, 7200.0, 10800.0],
+    ) == [10.0, 10.0, 20.0]
+
+
+@pytest.mark.parametrize(
+    "horizon",
+    [
+        [-1.0, 3600.0],
+        [10800.0, 14400.0],
+        [900.0, 14400.0],
+    ],
+)
+def test_strict_interval_fusion_rejects_out_of_range_horizon(horizon: list[float]) -> None:
+    """Starts and ends outside explicit coverage fail without extrapolation."""
+    with pytest.raises(ValueError, match="within coverage"):
+        fuse_to_intervals_strict(
+            None,
+            [(0.0, 10.0), (3600.0, 20.0), (7200.0, 30.0)],
+            horizon,
+            interval_boundaries=[0.0, 3600.0, 7200.0, 10800.0],
+        )
+
+
+@pytest.mark.parametrize(
+    ("series", "boundaries"),
+    [
+        ([(0.0, 1.0)], [0.0]),
+        ([(0.0, 1.0)], [0.0, 900.0, 1800.0]),
+        ([(0.0, 1.0), (900.0, 2.0)], [0.0, 600.0, 1800.0]),
+    ],
+)
+def test_strict_interval_fusion_rejects_malformed_explicit_boundaries(
+    series: list[tuple[float, float]],
+    boundaries: list[float],
+) -> None:
+    """Invalid N/N+1 or start/boundary combinations fail safely."""
+    with pytest.raises(ValueError, match="boundar"):
+        fuse_to_intervals_strict(
+            None,
+            series,
+            [0.0, 900.0],
+            interval_boundaries=boundaries,
+        )

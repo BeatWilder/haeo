@@ -2,8 +2,9 @@
 
 from bisect import bisect_right
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from itertools import pairwise
 import logging
 import time
 from typing import TYPE_CHECKING, Any, Literal, TypedDict
@@ -25,14 +26,37 @@ from custom_components.haeo.const import (
     OPTIMIZATION_STATUS_FAILED,
     OPTIMIZATION_STATUS_PENDING,
     OPTIMIZATION_STATUS_SUCCESS,
+    OUTPUT_NAME_CONFIGURED_HORIZON_HOURS,
+    OUTPUT_NAME_EFFECTIVE_HORIZON_HOURS,
+    OUTPUT_NAME_FORECAST_COVERAGE_RATIO,
+    OUTPUT_NAME_HORIZON_LIMIT_REASON,
+    OUTPUT_NAME_HORIZON_LIMITED,
+    OUTPUT_NAME_LIMITING_INPUT,
+    OUTPUT_NAME_LIMITING_INPUT_END_TIME,
     OUTPUT_NAME_OPTIMIZATION_COST,
     OUTPUT_NAME_OPTIMIZATION_DURATION,
     OUTPUT_NAME_OPTIMIZATION_STATUS,
     NetworkOutputName,
 )
 from custom_components.haeo.core.adapters.registry import ELEMENT_TYPES
-from custom_components.haeo.core.const import CONF_DEBOUNCE_SECONDS, CONF_ELEMENT_TYPE, DEFAULT_DEBOUNCE_SECONDS
+from custom_components.haeo.core.const import (
+    CONF_ADAPTIVE_HORIZON_ENABLED,
+    CONF_DEBOUNCE_SECONDS,
+    CONF_ELEMENT_TYPE,
+    CONF_MINIMUM_EFFECTIVE_HORIZON_MINUTES,
+    CONF_REQUIRED_FORECAST_COVERAGE_RATIO,
+    DEFAULT_ADAPTIVE_HORIZON_ENABLED,
+    DEFAULT_DEBOUNCE_SECONDS,
+    DEFAULT_MINIMUM_EFFECTIVE_HORIZON_MINUTES,
+    DEFAULT_REQUIRED_FORECAST_COVERAGE_RATIO,
+)
 from custom_components.haeo.core.context import OptimizationContext
+from custom_components.haeo.core.data.forecast_coverage import (
+    CoverageIssue,
+    EffectiveHorizon,
+    ForecastInput,
+    calculate_effective_horizon,
+)
 from custom_components.haeo.core.data.loader.config_loader import load_element_config_from_values
 from custom_components.haeo.core.model import ModelOutputName, Network, OutputData, OutputType
 from custom_components.haeo.core.model.topology import serialize_topology
@@ -58,6 +82,7 @@ if TYPE_CHECKING:
     from custom_components.haeo.elements import InputFieldPath
 
 _LOGGER = logging.getLogger(__name__)
+_MIN_HORIZON_BOUNDARIES = 2
 
 
 class ForecastPoint(TypedDict):
@@ -120,6 +145,18 @@ STATUS_OPTIONS: tuple[str, ...] = tuple(
             OPTIMIZATION_STATUS_SUCCESS,
         }
     )
+)
+
+HORIZON_DIAGNOSTIC_NAMES: frozenset[str] = frozenset(
+    {
+        OUTPUT_NAME_CONFIGURED_HORIZON_HOURS,
+        OUTPUT_NAME_EFFECTIVE_HORIZON_HOURS,
+        OUTPUT_NAME_HORIZON_LIMITED,
+        OUTPUT_NAME_HORIZON_LIMIT_REASON,
+        OUTPUT_NAME_LIMITING_INPUT,
+        OUTPUT_NAME_LIMITING_INPUT_END_TIME,
+        OUTPUT_NAME_FORECAST_COVERAGE_RATIO,
+    }
 )
 
 
@@ -229,12 +266,18 @@ def _build_coordinator_output(
         direction=output_data.direction,
         entity_category=(
             EntityCategory.DIAGNOSTIC
-            if output_name == OUTPUT_NAME_OPTIMIZATION_DURATION or output_data.type == OutputType.SHADOW_PRICE
+            if output_name == OUTPUT_NAME_OPTIMIZATION_DURATION
+            or output_name in HORIZON_DIAGNOSTIC_NAMES
+            or output_data.type == OutputType.SHADOW_PRICE
             else None
         ),
-        device_class=DEVICE_CLASS_MAP.get(output_data.type),
+        device_class=(
+            DEVICE_CLASS_MAP.get(output_data.type)
+            if output_data.type is not OutputType.STATUS or output_name == OUTPUT_NAME_OPTIMIZATION_STATUS
+            else None
+        ),
         state_class=STATE_CLASS_MAP.get(output_data.type),
-        options=(STATUS_OPTIONS if output_data.type == OutputType.STATUS else None),
+        options=(STATUS_OPTIONS if output_name == OUTPUT_NAME_OPTIMIZATION_STATUS else None),
         advanced=output_data.advanced,
         priority=output_data.priority,
         fixed=output_data.fixed,
@@ -246,6 +289,9 @@ def _build_optimization_context(
     participant_configs: Mapping[str, ElementConfigSchema],
     input_stores: Mapping[Any, "InputStore"],
     horizon_manager: HorizonManager,
+    *,
+    configured_timestamps: tuple[float, ...] | None = None,
+    effective_timestamps: tuple[float, ...] | None = None,
 ) -> OptimizationContext:
     """Build an optimization context by pulling from existing sources."""
     source_states: dict[str, EntityState] = {}
@@ -256,11 +302,20 @@ def _build_optimization_context(
     if horizon_start is None:
         horizon_start = datetime.now(UTC)
 
+    configured_start = datetime.fromtimestamp(configured_timestamps[0], tz=UTC) if configured_timestamps else None
+    configured_end = datetime.fromtimestamp(configured_timestamps[-1], tz=UTC) if configured_timestamps else None
+    effective_start = datetime.fromtimestamp(effective_timestamps[0], tz=UTC) if effective_timestamps else None
+    effective_end = datetime.fromtimestamp(effective_timestamps[-1], tz=UTC) if effective_timestamps else None
     return OptimizationContext(
         hub_config=hub_config,
         horizon_start=horizon_start,
         participants=dict(participant_configs),
         source_states=source_states,
+        configured_horizon_start=configured_start,
+        configured_horizon_end=configured_end,
+        effective_horizon_start=effective_start,
+        effective_horizon_end=effective_end,
+        effective_interval_count=(len(effective_timestamps) - 1 if effective_timestamps else None),
     )
 
 
@@ -282,6 +337,15 @@ class CoordinatorData:
 
     completed_at: datetime
     """When the optimization completed."""
+
+
+class AdaptiveHorizonError(ValueError):
+    """Raised when adaptive coverage cannot produce a safe optimization horizon."""
+
+    def __init__(self, analysis: EffectiveHorizon, reason: CoverageIssue) -> None:
+        super().__init__(reason.value)
+        self.analysis = analysis
+        self.reason = reason
 
 
 class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
@@ -310,6 +374,7 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self.network: Network = None  # type: ignore[assignment]
         self._element_updaters: dict[str, network_module.ElementUpdater] = {}
         self.topology: dict[str, Any] = {}  # Serialized topology for frontend
+        self.output_inventory: dict[str, SubentryDevices] = {}
 
         # Snapshot the participant structure (which elements exist and the shape
         # of each, including list fields like policy rules) taken from the same
@@ -392,6 +457,7 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self.config_entry,
             participants=loaded_configs,
         )
+        await self._async_initialize_output_inventory()
 
         # Subscribe to input store changes
         self._subscribe_to_input_stores()
@@ -399,6 +465,82 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
     def _get_config_entry(self) -> "HaeoConfigEntry":
         """Get the typed config entry."""
         return self.config_entry  # type: ignore[return-value]
+
+    async def _async_initialize_output_inventory(self) -> None:
+        """Build the complete read-only output entity inventory before refresh."""
+        runtime_data = self._get_runtime_data()
+        if runtime_data is None:
+            msg = "Runtime data not available"
+            raise RuntimeError(msg)
+        configured_times = runtime_data.horizon_manager.get_forecast_timestamps()
+        context = _build_optimization_context(
+            hub_config=self.config_entry.data,
+            participant_configs=self._get_participant_configs(),
+            input_stores=runtime_data.input_stores,
+            horizon_manager=runtime_data.horizon_manager,
+            configured_timestamps=configured_times,
+        )
+        translations = await async_get_translations(
+            self.hass,
+            self.hass.config.language,
+            "common",
+            integrations=[DOMAIN],
+        )
+        network_subentry_name = translations[f"component.{DOMAIN}.common.network_subentry_name"]
+        currency_sym = detect_currency_symbol(
+            context.source_states,
+            fallback_currency=self.hass.config.currency,
+        )
+        self.output_inventory = self._placeholder_plan_outputs(
+            context,
+            currency_sym=currency_sym,
+        )
+
+        network_outputs: dict[NetworkOutputName, OutputData] = {
+            OUTPUT_NAME_OPTIMIZATION_COST: OutputData(type=OutputType.COST, unit="$", values=(0.0,)),
+            OUTPUT_NAME_OPTIMIZATION_STATUS: OutputData(
+                type=OutputType.STATUS,
+                unit=None,
+                values=(OPTIMIZATION_STATUS_PENDING,),
+            ),
+            OUTPUT_NAME_OPTIMIZATION_DURATION: OutputData(
+                type=OutputType.DURATION,
+                unit=UnitOfTime.SECONDS,
+                values=(0.0,),
+            ),
+        }
+        if self._adaptive_horizon_enabled():
+            start = datetime.fromtimestamp(configured_times[0], tz=UTC)
+            end = datetime.fromtimestamp(configured_times[-1], tz=UTC)
+            network_outputs.update(
+                self._horizon_outputs(
+                    EffectiveHorizon(
+                        configured_start=start,
+                        configured_end=end,
+                        effective_end=end,
+                        limiting_input=None,
+                        reason=None,
+                        limiting_input_end=None,
+                        coverage_ratio=1.0,
+                        inputs=(),
+                    )
+                )
+            )
+        self.output_inventory[network_subentry_name] = {
+            ELEMENT_TYPE_NETWORK: {
+                name: replace(
+                    _build_coordinator_output(
+                        name,
+                        output,
+                        forecast_times=None,
+                        currency_sym=currency_sym,
+                    ),
+                    state=None,
+                    forecast=None,
+                )
+                for name, output in network_outputs.items()
+            }
+        }
 
     def _get_runtime_data(self) -> "HaeoRuntimeData | None":
         """Get runtime data from config entry, or None if not available."""
@@ -481,9 +623,10 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
         then triggers optimization. The period update propagates to all elements
         and segments, invalidating dependent constraints and costs.
         """
-        periods_seconds = horizon_manager.periods_seconds
-        periods_hours = np.asarray(periods_seconds, dtype=float) / 3600
-        network.update_periods(periods_hours)
+        if not self._adaptive_horizon_enabled():
+            periods_seconds = horizon_manager.periods_seconds
+            periods_hours = np.asarray(periods_seconds, dtype=float) / 3600
+            network.update_periods(periods_hours)
 
         # Trigger optimization - _are_inputs_aligned will gate until all elements update
         self.signal_optimization_stale()
@@ -714,6 +857,182 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 updater(element_config)
         self._pending_element_updates.clear()
 
+    def _adaptive_horizon_enabled(self) -> bool:
+        """Return whether strict adaptive forecast coverage is enabled."""
+        advanced = self.config_entry.data.get(HUB_SECTION_ADVANCED, {})
+        return bool(advanced.get(CONF_ADAPTIVE_HORIZON_ENABLED, DEFAULT_ADAPTIVE_HORIZON_ENABLED))
+
+    async def _prepare_adaptive_horizon(self, configured_times: tuple[float, ...]) -> EffectiveHorizon:
+        """Calculate and apply a strict effective horizon to all input stores."""
+        if len(configured_times) < _MIN_HORIZON_BOUNDARIES:
+            msg = "Configured horizon has fewer than two boundaries"
+            raise ValueError(msg)
+        start = datetime.fromtimestamp(configured_times[0], tz=UTC)
+        end = datetime.fromtimestamp(configured_times[-1], tz=UTC)
+        runtime_data = self._get_runtime_data()
+        if runtime_data is None:
+            msg = "Runtime data not available"
+            raise UpdateFailed(msg)
+
+        required: list[ForecastInput] = [
+            source for store in runtime_data.input_stores.values() for source in store.required_forecasts
+        ]
+        analysis = calculate_effective_horizon(
+            required,
+            configured_start=start,
+            configured_end=end,
+            required_timestamps=configured_times,
+        )
+        effective_times = tuple(
+            timestamp for timestamp in configured_times if timestamp <= analysis.effective_end.timestamp()
+        )
+        if effective_times:
+            actual_end = datetime.fromtimestamp(effective_times[-1], tz=UTC)
+            configured_seconds = (end - start).total_seconds()
+            analysis = replace(
+                analysis,
+                effective_end=actual_end,
+                coverage_ratio=max(0.0, (actual_end - start).total_seconds()) / configured_seconds,
+            )
+
+        advanced = self.config_entry.data.get(HUB_SECTION_ADVANCED, {})
+        minimum_minutes = float(
+            advanced.get(
+                CONF_MINIMUM_EFFECTIVE_HORIZON_MINUTES,
+                DEFAULT_MINIMUM_EFFECTIVE_HORIZON_MINUTES,
+            )
+        )
+        required_ratio = float(
+            advanced.get(
+                CONF_REQUIRED_FORECAST_COVERAGE_RATIO,
+                DEFAULT_REQUIRED_FORECAST_COVERAGE_RATIO,
+            )
+        )
+        effective_minutes = (
+            (effective_times[-1] - effective_times[0]) / 60 if len(effective_times) >= _MIN_HORIZON_BOUNDARIES else 0.0
+        )
+        if effective_minutes < minimum_minutes:
+            raise AdaptiveHorizonError(analysis, analysis.reason or CoverageIssue.INSUFFICIENT_COVERAGE)
+        if analysis.coverage_ratio < required_ratio:
+            raise AdaptiveHorizonError(analysis, CoverageIssue.INSUFFICIENT_COVERAGE)
+
+        for store in runtime_data.input_stores.values():
+            if not store.resolve_for_horizon(effective_times):
+                raise AdaptiveHorizonError(analysis, CoverageIssue.UNAVAILABLE)
+
+        periods_seconds = [
+            round(end_timestamp - start_timestamp) for start_timestamp, end_timestamp in pairwise(effective_times)
+        ]
+        loaded_configs = self._load_from_input_stores()
+        # A fresh model is mandatory: HiGHS variables and tracked arrays are sized
+        # at construction and must never be reused across a changed horizon.
+        self.network, self._element_updaters = await network_module.create_network(
+            self.config_entry,
+            periods_seconds=periods_seconds,
+            participants=loaded_configs,
+        )
+        self._pending_element_updates.clear()
+        element_types = {name: str(config[CONF_ELEMENT_TYPE]) for name, config in loaded_configs.items()}
+        self.topology = serialize_topology(self.network, element_types=element_types)
+        return analysis
+
+    @staticmethod
+    def _horizon_outputs(analysis: EffectiveHorizon) -> dict[NetworkOutputName, OutputData]:
+        """Build compact scalar horizon diagnostics."""
+        configured_hours = (analysis.configured_end - analysis.configured_start).total_seconds() / 3600
+        effective_hours = (analysis.effective_end - analysis.configured_start).total_seconds() / 3600
+        return {
+            OUTPUT_NAME_CONFIGURED_HORIZON_HOURS: OutputData(
+                type=OutputType.DURATION,
+                unit=UnitOfTime.HOURS,
+                values=(configured_hours,),
+            ),
+            OUTPUT_NAME_EFFECTIVE_HORIZON_HOURS: OutputData(
+                type=OutputType.DURATION,
+                unit=UnitOfTime.HOURS,
+                values=(effective_hours,),
+            ),
+            OUTPUT_NAME_HORIZON_LIMITED: OutputData(
+                type=OutputType.STATUS,
+                unit=None,
+                values=(analysis.limited,),
+            ),
+            OUTPUT_NAME_HORIZON_LIMIT_REASON: OutputData(
+                type=OutputType.STATUS,
+                unit=None,
+                values=((analysis.reason.value if analysis.reason else "none"),),
+            ),
+            OUTPUT_NAME_LIMITING_INPUT: OutputData(
+                type=OutputType.STATUS,
+                unit=None,
+                values=((analysis.limiting_input or "none"),),
+            ),
+            OUTPUT_NAME_LIMITING_INPUT_END_TIME: OutputData(
+                type=OutputType.STATUS,
+                unit=None,
+                values=(
+                    (
+                        analysis.limiting_input_end.astimezone(UTC).isoformat()
+                        if analysis.limiting_input_end
+                        else "unknown"
+                    ),
+                ),
+            ),
+            OUTPUT_NAME_FORECAST_COVERAGE_RATIO: OutputData(
+                type=OutputType.STATE_OF_CHARGE,
+                unit="%",
+                values=(analysis.coverage_ratio,),
+            ),
+        }
+
+    def _placeholder_plan_outputs(
+        self,
+        context: OptimizationContext,
+        *,
+        currency_sym: str,
+    ) -> dict[str, SubentryDevices]:
+        """Return the stable plan entity inventory with unavailable states.
+
+        The initial network already contains the complete configured model
+        structure. Adapter metadata can therefore be collected before a
+        successful optimization, allowing the sensor platform to register the
+        same entity IDs after either first-run success or first-run failure.
+        """
+        loaded_configs = self._load_from_input_stores()
+        model_outputs: dict[str, Mapping[ModelOutputName, OutputData]] = {
+            element_name: element.outputs() for element_name, element in self.network.elements.items()
+        }
+
+        outputs: dict[str, SubentryDevices] = {}
+        for element_name, element_config in context.participants.items():
+            element_type = element_config[CONF_ELEMENT_TYPE]
+            adapter_outputs = ELEMENT_TYPES[element_type].outputs(
+                name=element_name,
+                model_outputs=model_outputs,
+                config=loaded_configs[element_name],
+                periods=self.network.periods,
+            )
+            subentry_devices: SubentryDevices = {}
+            for device_name, device_outputs in adapter_outputs.items():
+                placeholders: dict[ElementOutputName, CoordinatorOutput] = {}
+                for output_name, output_data in device_outputs.items():
+                    built = _build_coordinator_output(
+                        output_name,
+                        output_data,
+                        forecast_times=None,
+                        currency_sym=currency_sym,
+                    )
+                    placeholders[output_name] = replace(
+                        built,
+                        state=None,
+                        forecast=None,
+                    )
+                if placeholders:
+                    subentry_devices[device_name] = placeholders
+            if subentry_devices:
+                outputs[element_name] = subentry_devices
+        return outputs
+
     async def _async_update_data(self) -> CoordinatorData:
         """Update data from input entities and run optimization."""
         # Check if optimization is already in progress
@@ -749,12 +1068,90 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
             forecast_timestamps = runtime_data.horizon_manager.get_forecast_timestamps()
 
-            # Build optimization context capturing all inputs for reproducibility
+            # Capture the configured source snapshot for the adaptive failure
+            # path. A successful run replaces this with a context containing the
+            # exact effective boundary vector used by the model.
             context = _build_optimization_context(
                 hub_config=self.config_entry.data,
                 participant_configs=self._get_participant_configs(),
                 input_stores=runtime_data.input_stores,
                 horizon_manager=runtime_data.horizon_manager,
+                configured_timestamps=forecast_timestamps,
+            )
+
+            horizon_analysis: EffectiveHorizon | None = None
+            if self._adaptive_horizon_enabled():
+                try:
+                    horizon_analysis = await self._prepare_adaptive_horizon(forecast_timestamps)
+                except AdaptiveHorizonError as err:
+                    end_time = time.time()
+                    translations = await async_get_translations(
+                        self.hass,
+                        self.hass.config.language,
+                        "common",
+                        integrations=[DOMAIN],
+                    )
+                    network_subentry_name = translations[f"component.{DOMAIN}.common.network_subentry_name"]
+                    failed_outputs: dict[NetworkOutputName, OutputData] = {
+                        OUTPUT_NAME_OPTIMIZATION_STATUS: OutputData(
+                            type=OutputType.STATUS,
+                            unit=None,
+                            values=(OPTIMIZATION_STATUS_FAILED,),
+                        ),
+                        OUTPUT_NAME_OPTIMIZATION_DURATION: OutputData(
+                            type=OutputType.DURATION,
+                            unit=UnitOfTime.SECONDS,
+                            values=(end_time - start_time,),
+                        ),
+                        **self._horizon_outputs(replace(err.analysis, reason=err.reason)),
+                    }
+                    currency_sym = detect_currency_symbol(
+                        context.source_states,
+                        fallback_currency=self.hass.config.currency,
+                    )
+                    failure_outputs = {
+                        subentry_name: {
+                            device_name: dict(device_outputs) for device_name, device_outputs in devices.items()
+                        }
+                        for subentry_name, devices in self.output_inventory.items()
+                    }
+                    if not failure_outputs:
+                        # Tests and third-party callers may invoke refresh without
+                        # async_initialize(); production always has the inventory.
+                        failure_outputs = self._placeholder_plan_outputs(
+                            context,
+                            currency_sym=currency_sym,
+                        )
+                    failure_outputs[network_subentry_name] = {
+                        ELEMENT_TYPE_NETWORK: {
+                            name: _build_coordinator_output(
+                                name,
+                                output,
+                                forecast_times=None,
+                                currency_sym=currency_sym,
+                            )
+                            for name, output in failed_outputs.items()
+                        }
+                    }
+                    return CoordinatorData(
+                        context=context,
+                        outputs=failure_outputs,
+                        started_at=started_at,
+                        completed_at=dt_util.utc_from_timestamp(end_time).astimezone(),
+                    )
+                forecast_timestamps = tuple(
+                    timestamp
+                    for timestamp in forecast_timestamps
+                    if timestamp <= horizon_analysis.effective_end.timestamp()
+                )
+
+            context = _build_optimization_context(
+                hub_config=self.config_entry.data,
+                participant_configs=self._get_participant_configs(),
+                input_stores=runtime_data.input_stores,
+                horizon_manager=runtime_data.horizon_manager,
+                configured_timestamps=runtime_data.horizon_manager.get_forecast_timestamps(),
+                effective_timestamps=forecast_timestamps,
             )
 
             # Verify all store-backed inputs are available before proceeding.
@@ -799,6 +1196,8 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
                     type=OutputType.DURATION, unit=UnitOfTime.SECONDS, values=(optimization_duration,)
                 ),
             }
+            if horizon_analysis is not None:
+                network_output_data.update(self._horizon_outputs(horizon_analysis))
 
             # Load the network subentry name from translations
             translations = await async_get_translations(

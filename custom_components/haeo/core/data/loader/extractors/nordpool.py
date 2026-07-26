@@ -10,7 +10,7 @@ See: https://github.com/custom-components/nordpool
 
 from collections.abc import Mapping, Sequence
 import logging
-from typing import Literal, Protocol, TypedDict, TypeGuard
+from typing import Literal, NotRequired, Protocol, TypedDict, TypeGuard
 
 from custom_components.haeo.core.state import EntityState
 from custom_components.haeo.core.units import DeviceClass
@@ -35,7 +35,7 @@ class NordpoolAttributes(TypedDict):
     """Type definition for Nordpool State attributes."""
 
     raw_today: Sequence[NordpoolForecastEntry]
-    raw_tomorrow: Sequence[NordpoolForecastEntry]
+    raw_tomorrow: NotRequired[Sequence[NordpoolForecastEntry] | None]
     currency: str
 
 
@@ -76,7 +76,7 @@ class Parser:
     def detect(state: EntityState) -> TypeGuard[NordpoolState]:
         """Check if data matches Nordpool format and narrow type."""
         attrs = state.attributes
-        if "raw_today" not in attrs or "raw_tomorrow" not in attrs or "currency" not in attrs:
+        if "raw_today" not in attrs or "currency" not in attrs:
             return False
 
         if not isinstance(attrs["currency"], str):
@@ -85,7 +85,9 @@ class Parser:
         if not Parser._is_valid_entries(attrs["raw_today"]):
             return False
 
-        raw_tomorrow = attrs["raw_tomorrow"]
+        raw_tomorrow = attrs.get("raw_tomorrow")
+        if raw_tomorrow is None:
+            return True
         if not isinstance(raw_tomorrow, Sequence) or isinstance(raw_tomorrow, (str, bytes)):
             return False
 
@@ -121,7 +123,7 @@ class Parser:
         """
         parsed = Parser._parse_entries(state.attributes["raw_today"])
 
-        raw_tomorrow = state.attributes["raw_tomorrow"]
+        raw_tomorrow = state.attributes.get("raw_tomorrow")
         if raw_tomorrow:
             parsed.extend(Parser._parse_entries(raw_tomorrow))
 

@@ -11,11 +11,17 @@ from homeassistant.helpers.translation import async_get_translations
 from custom_components.haeo.const import CONF_INTEGRATION_TYPE, DOMAIN, ELEMENT_TYPE_NETWORK, INTEGRATION_TYPE_HUB
 from custom_components.haeo.core.adapters.registry import ELEMENT_TYPES
 from custom_components.haeo.core.const import (
+    CONF_ADAPTIVE_HORIZON_ENABLED,
     CONF_ADVANCED_MODE,
     CONF_DEBOUNCE_SECONDS,
     CONF_ELEMENT_TYPE,
     CONF_HORIZON_PRESET,
+    CONF_MINIMUM_EFFECTIVE_HORIZON_MINUTES,
+    CONF_REQUIRED_FORECAST_COVERAGE_RATIO,
+    DEFAULT_ADAPTIVE_HORIZON_ENABLED,
     DEFAULT_DEBOUNCE_SECONDS,
+    DEFAULT_MINIMUM_EFFECTIVE_HORIZON_MINUTES,
+    DEFAULT_REQUIRED_FORECAST_COVERAGE_RATIO,
 )
 from custom_components.haeo.core.schema.elements import ElementType
 from custom_components.haeo.core.schema.elements.node import CONF_IS_SINK, CONF_IS_SOURCE
@@ -126,6 +132,18 @@ class HubConfigFlow(ConfigFlow, domain=DOMAIN):
                 HUB_SECTION_ADVANCED: {
                     CONF_DEBOUNCE_SECONDS: DEFAULT_DEBOUNCE_SECONDS,
                     CONF_ADVANCED_MODE: self._user_input[HUB_SECTION_ADVANCED][CONF_ADVANCED_MODE],
+                    CONF_ADAPTIVE_HORIZON_ENABLED: self._user_input[HUB_SECTION_ADVANCED].get(
+                        CONF_ADAPTIVE_HORIZON_ENABLED,
+                        DEFAULT_ADAPTIVE_HORIZON_ENABLED,
+                    ),
+                    CONF_MINIMUM_EFFECTIVE_HORIZON_MINUTES: self._user_input[HUB_SECTION_ADVANCED].get(
+                        CONF_MINIMUM_EFFECTIVE_HORIZON_MINUTES,
+                        DEFAULT_MINIMUM_EFFECTIVE_HORIZON_MINUTES,
+                    ),
+                    CONF_REQUIRED_FORECAST_COVERAGE_RATIO: self._user_input[HUB_SECTION_ADVANCED].get(
+                        CONF_REQUIRED_FORECAST_COVERAGE_RATIO,
+                        DEFAULT_REQUIRED_FORECAST_COVERAGE_RATIO,
+                    ),
                 },
             },
             subentries=[

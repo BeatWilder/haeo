@@ -2,6 +2,7 @@
 
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
+import json
 import time
 from types import MappingProxyType
 from typing import Any
@@ -23,6 +24,10 @@ from custom_components.haeo.const import (
     DOMAIN,
     ELEMENT_TYPE_NETWORK,
     INTEGRATION_TYPE_HUB,
+    OUTPUT_NAME_HORIZON_LIMIT_REASON,
+    OUTPUT_NAME_HORIZON_LIMITED,
+    OUTPUT_NAME_LIMITING_INPUT,
+    OUTPUT_NAME_LIMITING_INPUT_END_TIME,
     OUTPUT_NAME_OPTIMIZATION_COST,
     OUTPUT_NAME_OPTIMIZATION_DURATION,
     OUTPUT_NAME_OPTIMIZATION_STATUS,
@@ -38,16 +43,19 @@ from custom_components.haeo.coordinator import (
     _localize_currency,
     detect_currency_symbol,
 )
-from custom_components.haeo.coordinator.coordinator import _select_forecast_state
+from custom_components.haeo.coordinator.coordinator import AdaptiveHorizonError, _select_forecast_state
 from custom_components.haeo.core.adapters.elements.battery import BATTERY_DEVICE_BATTERY, BATTERY_POWER_CHARGE
 from custom_components.haeo.core.adapters.elements.connection import CONNECTION_DEVICE_CONNECTION, CONNECTION_POWER
 from custom_components.haeo.core.adapters.elements.grid import GRID_COST_NET, GRID_POWER_MAX_IMPORT_PRICE
 from custom_components.haeo.core.adapters.elements.solar import SOLAR_POWER
 from custom_components.haeo.core.adapters.registry import ELEMENT_TYPES
 from custom_components.haeo.core.const import (
+    CONF_ADAPTIVE_HORIZON_ENABLED,
     CONF_DEBOUNCE_SECONDS,
     CONF_ELEMENT_TYPE,
+    CONF_MINIMUM_EFFECTIVE_HORIZON_MINUTES,
     CONF_NAME,
+    CONF_REQUIRED_FORECAST_COVERAGE_RATIO,
     CONF_TIER_1_COUNT,
     CONF_TIER_1_DURATION,
     CONF_TIER_2_COUNT,
@@ -61,6 +69,7 @@ from custom_components.haeo.core.const import (
     DEFAULT_TIER_3_DURATION,
     DEFAULT_TIER_4_DURATION,
 )
+from custom_components.haeo.core.data.forecast_coverage import CoverageIssue, EffectiveHorizon, ForecastInput
 from custom_components.haeo.core.model import Network, OutputData, OutputType
 from custom_components.haeo.core.model.elements import MODEL_ELEMENT_TYPE_NODE
 from custom_components.haeo.core.schema import as_connection_target, as_constant_value, as_entity_value
@@ -287,6 +296,284 @@ def test_coordinator_initialization_collects_participants(
     assert coordinator.hass is hass
     assert coordinator.config_entry is mock_hub_entry
     assert set(coordinator._get_participant_configs()) == {"Test Battery", "Test Grid"}
+
+
+def test_adaptive_horizon_disabled_by_default(
+    hass: HomeAssistant,
+    mock_hub_entry: MockConfigEntry,
+    mock_runtime_data: HaeoRuntimeData,
+) -> None:
+    """Existing entries remain on the legacy configured-horizon path."""
+    coordinator = HaeoDataUpdateCoordinator(hass, mock_hub_entry)
+    assert not coordinator._adaptive_horizon_enabled()
+
+
+def test_horizon_diagnostics_are_compact_scalars() -> None:
+    """Adaptive diagnostics contain no forecast arrays or oversized attributes."""
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    analysis = EffectiveHorizon(
+        configured_start=start,
+        configured_end=start + timedelta(hours=12),
+        effective_end=start + timedelta(hours=6),
+        limiting_input="sensor.load_forecast",
+        reason=CoverageIssue.EARLY_END,
+        limiting_input_end=start + timedelta(hours=6),
+        coverage_ratio=0.5,
+        inputs=(),
+    )
+    outputs = HaeoDataUpdateCoordinator._horizon_outputs(analysis)
+    assert all(len(output.values) == 1 for output in outputs.values())
+    assert len(json.dumps({name: output.values[0] for name, output in outputs.items()})) < 1024
+
+
+def test_placeholder_plan_inventory_has_unavailable_states(
+    hass: HomeAssistant,
+    mock_hub_entry: MockConfigEntry,
+) -> None:
+    """First-run failure still exposes the stable plan entity inventory."""
+    coordinator = HaeoDataUpdateCoordinator(hass, mock_hub_entry)
+    model_element = MagicMock()
+    model_element.outputs.return_value = {}
+    coordinator.network = MagicMock(
+        elements={"Load": model_element},
+        periods=np.array([1.0]),
+    )
+    context = OptimizationContext(
+        hub_config={},
+        horizon_start=datetime(2026, 1, 1, tzinfo=UTC),
+        participants={
+            "Load": {
+                CONF_ELEMENT_TYPE: ElementType.LOAD,
+            }
+        },
+        source_states={},
+    )
+    adapter = MagicMock()
+    adapter.outputs.return_value = {
+        "Load": {
+            SOLAR_POWER: OutputData(
+                type=OutputType.POWER,
+                unit="kW",
+                values=(1.0,),
+            )
+        }
+    }
+
+    with (
+        patch.object(
+            coordinator,
+            "_load_from_input_stores",
+            return_value={"Load": {CONF_ELEMENT_TYPE: ElementType.LOAD}},
+        ),
+        patch.dict(ELEMENT_TYPES, {ElementType.LOAD: adapter}, clear=False),
+    ):
+        outputs = coordinator._placeholder_plan_outputs(context, currency_sym="€")
+
+    placeholder = outputs["Load"]["Load"][SOLAR_POWER]
+    assert placeholder.state is None
+    assert placeholder.forecast is None
+    assert placeholder.device_class is not None
+
+
+async def test_output_inventory_is_initialized_when_adaptive_is_disabled(
+    hass: HomeAssistant,
+    mock_hub_entry: MockConfigEntry,
+    mock_runtime_data: HaeoRuntimeData,
+) -> None:
+    """Stable legacy network outputs exist independently of coordinator data."""
+    mock_hub_entry.data[HUB_SECTION_ADVANCED][CONF_ADAPTIVE_HORIZON_ENABLED] = False
+    coordinator = HaeoDataUpdateCoordinator(hass, mock_hub_entry)
+    coordinator.network = MagicMock(elements={}, periods=np.array([1.0]))
+
+    with (
+        patch.object(coordinator, "_get_participant_configs", return_value={}),
+        patch.object(coordinator, "_load_from_input_stores", return_value={}),
+        patch(
+            "custom_components.haeo.coordinator.coordinator.async_get_translations",
+            new_callable=AsyncMock,
+            return_value={f"component.{DOMAIN}.common.network_subentry_name": "System"},
+        ),
+    ):
+        await coordinator._async_initialize_output_inventory()
+
+    network_outputs = coordinator.output_inventory["System"][ELEMENT_TYPE_NETWORK]
+    assert set(network_outputs) == {
+        OUTPUT_NAME_OPTIMIZATION_COST,
+        OUTPUT_NAME_OPTIMIZATION_STATUS,
+        OUTPUT_NAME_OPTIMIZATION_DURATION,
+    }
+    assert all(output.state is None for output in network_outputs.values())
+
+
+async def test_adaptive_horizon_rebuilds_for_shrink_and_growth(
+    hass: HomeAssistant,
+    mock_hub_entry: MockConfigEntry,
+    mock_runtime_data: HaeoRuntimeData,
+) -> None:
+    """Every changed effective dimension gets a fresh model and bindings."""
+    advanced = mock_hub_entry.data[HUB_SECTION_ADVANCED]
+    advanced.update(
+        {
+            CONF_ADAPTIVE_HORIZON_ENABLED: True,
+            CONF_MINIMUM_EFFECTIVE_HORIZON_MINUTES: 60,
+            CONF_REQUIRED_FORECAST_COVERAGE_RATIO: 0.0,
+        }
+    )
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    configured = tuple((start + timedelta(hours=index)).timestamp() for index in range(7))
+    store = MagicMock()
+    store.required_forecasts = (
+        ForecastInput(
+            "sensor.required",
+            tuple(((start + timedelta(hours=index)).timestamp(), float(index)) for index in range(2)),
+            interval_boundaries=tuple((start + timedelta(hours=index)).timestamp() for index in range(3)),
+        ),
+    )
+    store.resolve_for_horizon.return_value = True
+    mock_runtime_data.input_stores = {("Load", ("forecast",)): store}
+    coordinator = HaeoDataUpdateCoordinator(hass, mock_hub_entry)
+
+    first_network = MagicMock()
+    second_network = MagicMock()
+    with (
+        patch.object(coordinator, "_load_from_input_stores", return_value={}),
+        patch(
+            "custom_components.haeo.coordinator.coordinator.network_module.create_network",
+            side_effect=[(first_network, {}), (second_network, {})],
+        ) as create_network,
+        patch("custom_components.haeo.coordinator.coordinator.serialize_topology", return_value={}),
+    ):
+        first = await coordinator._prepare_adaptive_horizon(configured)
+        store.required_forecasts = (
+            ForecastInput(
+                "sensor.required",
+                tuple(((start + timedelta(hours=index)).timestamp(), float(index)) for index in range(4)),
+                interval_boundaries=tuple((start + timedelta(hours=index)).timestamp() for index in range(5)),
+            ),
+        )
+        second = await coordinator._prepare_adaptive_horizon(configured)
+
+    assert first.effective_end == start + timedelta(hours=2)
+    assert second.effective_end == start + timedelta(hours=4)
+    assert coordinator.network is second_network
+    assert create_network.await_args_list[0].kwargs["periods_seconds"] == [3600, 3600]
+    assert create_network.await_args_list[1].kwargs["periods_seconds"] == [3600, 3600, 3600, 3600]
+
+
+@pytest.mark.parametrize(("hours", "raises"), [(6, False), (5, True)])
+async def test_adaptive_horizon_minimum_is_inclusive(
+    hass: HomeAssistant,
+    mock_hub_entry: MockConfigEntry,
+    mock_runtime_data: HaeoRuntimeData,
+    hours: int,
+    raises: bool,
+) -> None:
+    """Exactly the configured minimum is valid; anything shorter fails safely."""
+    advanced = mock_hub_entry.data[HUB_SECTION_ADVANCED]
+    advanced.update(
+        {
+            CONF_ADAPTIVE_HORIZON_ENABLED: True,
+            CONF_MINIMUM_EFFECTIVE_HORIZON_MINUTES: 360,
+            CONF_REQUIRED_FORECAST_COVERAGE_RATIO: 0.0,
+        }
+    )
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    configured = tuple((start + timedelta(hours=index)).timestamp() for index in range(13))
+    store = MagicMock()
+    store.required_forecasts = (
+        ForecastInput(
+            "sensor.required",
+            tuple(((start + timedelta(hours=index)).timestamp(), float(index)) for index in range(hours)),
+        ),
+    )
+    store.resolve_for_horizon.return_value = True
+    mock_runtime_data.input_stores = {("Load", ("forecast",)): store}
+    coordinator = HaeoDataUpdateCoordinator(hass, mock_hub_entry)
+
+    with (
+        patch.object(coordinator, "_load_from_input_stores", return_value={}),
+        patch(
+            "custom_components.haeo.coordinator.coordinator.network_module.create_network",
+            return_value=(MagicMock(), {}),
+        ),
+        patch("custom_components.haeo.coordinator.coordinator.serialize_topology", return_value={}),
+    ):
+        if raises:
+            with pytest.raises(ValueError, match=CoverageIssue.EARLY_END.value):
+                await coordinator._prepare_adaptive_horizon(configured)
+        else:
+            result = await coordinator._prepare_adaptive_horizon(configured)
+            assert result.effective_end == start + timedelta(hours=6)
+
+
+async def test_sparse_forecast_fails_below_minimum_horizon(
+    hass: HomeAssistant,
+    mock_hub_entry: MockConfigEntry,
+    mock_runtime_data: HaeoRuntimeData,
+) -> None:
+    """An ambiguous two-point source cannot satisfy the minimum horizon."""
+    mock_hub_entry.data[HUB_SECTION_ADVANCED].update(
+        {
+            CONF_ADAPTIVE_HORIZON_ENABLED: True,
+            CONF_MINIMUM_EFFECTIVE_HORIZON_MINUTES: 60,
+            CONF_REQUIRED_FORECAST_COVERAGE_RATIO: 0.0,
+        }
+    )
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    configured = tuple((start + timedelta(hours=index)).timestamp() for index in range(13))
+    store = MagicMock()
+    store.required_forecasts = (
+        ForecastInput(
+            "sensor.sparse",
+            (
+                (start.timestamp(), 1.0),
+                ((start + timedelta(hours=8)).timestamp(), 2.0),
+            ),
+        ),
+    )
+    mock_runtime_data.input_stores = {("Load", ("forecast",)): store}
+    coordinator = HaeoDataUpdateCoordinator(hass, mock_hub_entry)
+
+    with pytest.raises(
+        AdaptiveHorizonError,
+        match=CoverageIssue.AMBIGUOUS_CADENCE.value,
+    ):
+        await coordinator._prepare_adaptive_horizon(configured)
+    store.resolve_for_horizon.assert_not_called()
+
+
+async def test_required_missing_forecast_attribute_fails_before_optimization(
+    hass: HomeAssistant,
+    mock_hub_entry: MockConfigEntry,
+    mock_runtime_data: HaeoRuntimeData,
+) -> None:
+    """A typed missing required forecast blocks adaptive model creation."""
+    mock_hub_entry.data[HUB_SECTION_ADVANCED].update(
+        {
+            CONF_ADAPTIVE_HORIZON_ENABLED: True,
+            CONF_MINIMUM_EFFECTIVE_HORIZON_MINUTES: 60,
+            CONF_REQUIRED_FORECAST_COVERAGE_RATIO: 0.0,
+        }
+    )
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    configured = tuple((start + timedelta(hours=index)).timestamp() for index in range(13))
+    store = MagicMock()
+    store.required_forecasts = (
+        ForecastInput(
+            "sensor.required",
+            None,
+            extraction_issue=CoverageIssue.MISSING_FORECAST_ATTRIBUTE,
+        ),
+    )
+    mock_runtime_data.input_stores = {("Load", ("forecast",)): store}
+    coordinator = HaeoDataUpdateCoordinator(hass, mock_hub_entry)
+
+    with pytest.raises(
+        AdaptiveHorizonError,
+        match=CoverageIssue.MISSING_FORECAST_ATTRIBUTE.value,
+    ):
+        await coordinator._prepare_adaptive_horizon(configured)
+    store.resolve_for_horizon.assert_not_called()
 
 
 def test_load_element_config_reflects_store_values(
@@ -720,6 +1007,31 @@ def test_build_coordinator_output_sets_status_options() -> None:
     assert output.options == STATUS_OPTIONS
     assert output.state == "success"
     assert output.forecast is None
+
+
+@pytest.mark.parametrize(
+    ("output_name", "state"),
+    [(OUTPUT_NAME_HORIZON_LIMITED, True)]
+    + [(OUTPUT_NAME_HORIZON_LIMIT_REASON, issue.value) for issue in CoverageIssue]
+    + [
+        (OUTPUT_NAME_LIMITING_INPUT, "sensor.load_forecast"),
+        (OUTPUT_NAME_LIMITING_INPUT_END_TIME, "2026-01-01T06:00:00+00:00"),
+    ],
+)
+def test_adaptive_string_diagnostics_are_not_enums(
+    output_name: str,
+    state: object,
+) -> None:
+    """Variable adaptive diagnostic states never receive enum metadata."""
+    output = _build_coordinator_output(
+        output_name,
+        OutputData(type=OutputType.STATUS, unit=None, values=(state,)),
+        forecast_times=None,
+        currency_sym="$",
+    )
+    assert output.options is None
+    assert output.device_class is None
+    assert output.state == state
 
 
 def test_build_coordinator_output_skips_forecast_for_single_value() -> None:
@@ -1855,6 +2167,48 @@ def test_build_optimization_context_falls_back_to_utcnow_when_no_start_time() ->
 
     assert context.horizon_start is not None
     assert isinstance(context.horizon_start, datetime)
+
+
+def test_optimization_context_tracks_shortened_then_full_horizon(
+    mock_hub_entry: MockConfigEntry,
+    mock_runtime_data: HaeoRuntimeData,
+) -> None:
+    """Effective context metadata is rebuilt for every optimization run."""
+    start = datetime(2026, 1, 1, tzinfo=UTC).timestamp()
+    configured = tuple(start + index * 3600 for index in range(7))
+    shortened = configured[:4]
+
+    first = _build_optimization_context(
+        hub_config=mock_hub_entry.data,
+        participant_configs={},
+        input_stores={},
+        horizon_manager=mock_runtime_data.horizon_manager,
+        configured_timestamps=configured,
+        effective_timestamps=shortened,
+    )
+    second = _build_optimization_context(
+        hub_config=mock_hub_entry.data,
+        participant_configs={},
+        input_stores={},
+        horizon_manager=mock_runtime_data.horizon_manager,
+        configured_timestamps=configured,
+        effective_timestamps=configured,
+    )
+
+    assert first.configured_horizon_end == datetime.fromtimestamp(
+        configured[-1],
+        tz=UTC,
+    )
+    assert first.effective_horizon_end == datetime.fromtimestamp(
+        shortened[-1],
+        tz=UTC,
+    )
+    assert first.effective_interval_count == 3
+    assert second.effective_horizon_end == datetime.fromtimestamp(
+        configured[-1],
+        tz=UTC,
+    )
+    assert second.effective_interval_count == 6
 
 
 def test_optimization_context_is_immutable() -> None:

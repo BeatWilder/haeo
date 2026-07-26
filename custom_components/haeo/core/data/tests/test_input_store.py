@@ -6,6 +6,7 @@ and a tiny in-memory storage double so values resolve identically to the config
 loader (``resolve_field``/``resolve_constant``).
 """
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import patch
 
@@ -13,6 +14,7 @@ import numpy as np
 import pytest
 
 from conftest import FakeEntityState, FakeStateMachine
+from custom_components.haeo.core.data.forecast_coverage import CoverageIssue, calculate_effective_horizon
 from custom_components.haeo.core.data.input_store import InputMode, create_input_store
 from custom_components.haeo.core.model.const import OutputType
 from custom_components.haeo.core.schema import as_constant_value, as_entity_value
@@ -251,6 +253,188 @@ async def test_driven_async_load_negates_time_series() -> None:
 
     assert isinstance(store.value, np.ndarray)
     assert np.all(store.value < 0)
+
+
+@pytest.mark.parametrize(
+    ("attributes", "issue"),
+    [
+        ({"forecast": []}, CoverageIssue.UNAVAILABLE),
+        ({"forecast": "broken"}, CoverageIssue.UNSUPPORTED_STRUCTURE),
+        (
+            {"forecast": [{"time": "not-a-time", "value": 1.0}]},
+            CoverageIssue.MALFORMED_TIMESTAMP,
+        ),
+        (
+            {"forecast": [{"time": "2026-01-01T00:00:00+00:00", "value": "bad"}]},
+            CoverageIssue.NON_NUMERIC_VALUE,
+        ),
+    ],
+)
+async def test_required_invalid_forecast_never_disappears_as_scalar(
+    attributes: dict[str, object],
+    issue: CoverageIssue,
+) -> None:
+    """A numeric fallback state cannot hide an invalid required forecast."""
+    store = _make_store(
+        storage_value=as_entity_value(["sensor.x"]),
+        output_type=OutputType.POWER,
+        time_series=True,
+    )
+    sm = FakeStateMachine({"sensor.x": FakeEntityState("sensor.x", "42", attributes)})
+    assert await store.async_load(sm) is True
+
+    required = store.required_forecasts
+    assert len(required) == 1
+    assert required[0].entity_id == "sensor.x"
+    assert required[0].extraction_issue is issue
+
+
+async def test_required_time_series_numeric_state_without_forecast_is_retained() -> None:
+    """Configured time-series intent overrides a numeric scalar fallback."""
+    store = _make_store(
+        storage_value=as_entity_value(["sensor.x"]),
+        output_type=OutputType.POWER,
+        time_series=True,
+    )
+    sm = FakeStateMachine({"sensor.x": FakeEntityState("sensor.x", "42", {})})
+    assert await store.async_load(sm) is True
+    required = store.required_forecasts
+    assert len(required) == 1
+    assert required[0].entity_id == "sensor.x"
+    assert required[0].extraction_issue is CoverageIssue.MISSING_FORECAST_ATTRIBUTE
+
+
+async def test_resolve_for_horizon_preserves_irregular_explicit_final_boundary() -> None:
+    """Strict store resolution uses the extracted N+1 boundary vector."""
+    store = _make_store(
+        storage_value=as_entity_value(["sensor.x"]),
+        output_type=OutputType.POWER,
+        time_series=True,
+    )
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    boundaries = (
+        start,
+        start + timedelta(minutes=5),
+        start + timedelta(minutes=10),
+        start + timedelta(minutes=12, seconds=30),
+    )
+    state = FakeEntityState(
+        "sensor.x",
+        "0",
+        {
+            "unit_of_measurement": "kW",
+            "forecast": [
+                {"time": boundaries[0].isoformat(), "end_time": boundaries[1].isoformat(), "value": 1.0},
+                {"time": boundaries[1].isoformat(), "end_time": boundaries[2].isoformat(), "value": 2.0},
+                {"time": boundaries[2].isoformat(), "end_time": boundaries[3].isoformat(), "value": 3.0},
+            ],
+        },
+    )
+    assert await store.async_load(FakeStateMachine({"sensor.x": state})) is True
+    epoch_boundaries = tuple(boundary.timestamp() for boundary in boundaries)
+
+    assert store.resolve_for_horizon(epoch_boundaries) is True
+    assert np.array_equal(store.value, np.array([1.0, 2.0, 3.0]))
+    assert store.resolve_for_horizon((*epoch_boundaries[:-1], epoch_boundaries[-1] + 150.0)) is False
+
+
+async def test_segmented_forecast_resolves_primary_then_extends_after_recovery() -> None:
+    """An optional later segment extends the next run without stale coverage."""
+    store = _make_store(
+        storage_value=as_entity_value(["sensor.nordpool"]),
+        output_type=OutputType.PRICE,
+        time_series=True,
+    )
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    middle = start + timedelta(hours=1)
+    primary_end = start + timedelta(hours=2, minutes=15)
+    later_end = start + timedelta(hours=3)
+
+    def entry(begin: datetime, end: datetime, value: float) -> dict[str, object]:
+        return {"start": begin.isoformat(), "end": end.isoformat(), "value": value}
+
+    primary = [entry(start, middle, 1.0), entry(middle, primary_end, 2.0)]
+    initial = FakeEntityState(
+        "sensor.nordpool",
+        "1.0",
+        {"currency": "EUR", "raw_today": primary, "raw_tomorrow": None},
+    )
+    assert await store.async_load(FakeStateMachine({"sensor.nordpool": initial})) is True
+    primary_horizon = (start.timestamp(), middle.timestamp(), primary_end.timestamp())
+    assert store.resolve_for_horizon(primary_horizon) is True
+    assert np.array_equal(store.value, np.array([1.0, 2.0]))
+    assert store.resolve_for_horizon((*primary_horizon, later_end.timestamp())) is False
+
+    recovered = FakeEntityState(
+        "sensor.nordpool",
+        "1.0",
+        {
+            "currency": "EUR",
+            "raw_today": primary,
+            "raw_tomorrow": [entry(primary_end, later_end, 3.0)],
+        },
+    )
+    store.capture_state("sensor.nordpool", recovered)
+    assert store.resolve_for_horizon((*primary_horizon, later_end.timestamp())) is True
+    assert np.array_equal(store.value, np.array([1.0, 2.0, 3.0]))
+
+
+async def test_nordpool_primary_resolves_when_horizon_starts_inside_interval() -> None:
+    """Coverage and strict fusion agree for an intra-interval planning start."""
+    store = _make_store(
+        storage_value=as_entity_value(["sensor.nordpool"]),
+        output_type=OutputType.PRICE,
+        time_series=True,
+    )
+    start = datetime(2026, 1, 1, 12, tzinfo=UTC)
+    boundaries = tuple(start + timedelta(hours=index) for index in range(4))
+    state = FakeEntityState(
+        "sensor.nordpool",
+        "10",
+        {
+            "currency": "EUR",
+            "raw_today": [
+                {
+                    "start": boundaries[index].isoformat(),
+                    "end": boundaries[index + 1].isoformat(),
+                    "value": value,
+                }
+                for index, value in enumerate((10.0, 20.0, 30.0))
+            ],
+            "raw_tomorrow": None,
+        },
+    )
+    assert await store.async_load(FakeStateMachine({"sensor.nordpool": state})) is True
+    horizon = (
+        (start + timedelta(minutes=15)).timestamp(),
+        (start + timedelta(minutes=30)).timestamp(),
+        boundaries[1].timestamp(),
+        boundaries[2].timestamp(),
+    )
+    coverage = calculate_effective_horizon(
+        store.required_forecasts,
+        configured_start=start + timedelta(minutes=15),
+        configured_end=boundaries[2],
+        required_timestamps=horizon,
+    )
+    assert coverage.effective_end == boundaries[2]
+    assert store.resolve_for_horizon(horizon) is True
+    assert np.array_equal(store.value, np.array([10.0, 10.0, 20.0]))
+
+    beyond_source = (*horizon, boundaries[-1].timestamp() + 3600.0)
+    assert store.resolve_for_horizon(beyond_source) is False
+
+
+async def test_genuine_scalar_source_is_ignored_by_forecast_coverage() -> None:
+    """A non-time-series input never participates in adaptive coverage."""
+    store = _make_store(
+        storage_value=as_entity_value(["sensor.x"]),
+        output_type=OutputType.POWER,
+        time_series=False,
+    )
+    sm = FakeStateMachine({"sensor.x": FakeEntityState("sensor.x", "unknown", {})})
+    assert await store.async_load(sm) is False
+    assert store.required_forecasts == ()
 
 
 def test_negate_does_not_affect_editable_constant() -> None:

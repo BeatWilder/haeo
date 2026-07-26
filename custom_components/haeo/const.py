@@ -42,12 +42,26 @@ type NetworkOutputName = Literal[
     "network_optimization_cost",
     "network_optimization_status",
     "network_optimization_duration",
+    "configured_horizon_hours",
+    "effective_horizon_hours",
+    "horizon_limited",
+    "horizon_limit_reason",
+    "limiting_input",
+    "limiting_input_end_time",
+    "forecast_coverage_ratio",
 ]
 NETWORK_OUTPUT_NAMES: Final[frozenset[NetworkOutputName]] = frozenset(
     [
         OUTPUT_NAME_OPTIMIZATION_COST := "network_optimization_cost",
         OUTPUT_NAME_OPTIMIZATION_STATUS := "network_optimization_status",
         OUTPUT_NAME_OPTIMIZATION_DURATION := "network_optimization_duration",
+        OUTPUT_NAME_CONFIGURED_HORIZON_HOURS := "configured_horizon_hours",
+        OUTPUT_NAME_EFFECTIVE_HORIZON_HOURS := "effective_horizon_hours",
+        OUTPUT_NAME_HORIZON_LIMITED := "horizon_limited",
+        OUTPUT_NAME_HORIZON_LIMIT_REASON := "horizon_limit_reason",
+        OUTPUT_NAME_LIMITING_INPUT := "limiting_input",
+        OUTPUT_NAME_LIMITING_INPUT_END_TIME := "limiting_input_end_time",
+        OUTPUT_NAME_FORECAST_COVERAGE_RATIO := "forecast_coverage_ratio",
     ]
 )
 

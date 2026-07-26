@@ -5,10 +5,28 @@
       "user": {
         "title": "HAEO Setup",
         "description": "Configure your system and choose a planning horizon that matches your forecast data availability.",
-        "data": { "advanced_mode": "Advanced Mode", "horizon_preset": "Planning Horizon", "name": "System Name" },
-        "data_description": { "advanced_mode": "Reveals additional element types for complex energy systems." },
+        "data": {
+          "adaptive_horizon_enabled": "Adaptive forecast horizon",
+          "advanced_mode": "Advanced Mode",
+          "horizon_preset": "Planning Horizon",
+          "minimum_effective_horizon_minutes": "Minimum effective horizon (minutes)",
+          "name": "System Name",
+          "required_forecast_coverage_ratio": "Required forecast coverage ratio"
+        },
+        "data_description": {
+          "adaptive_horizon_enabled": "Limits optimization to continuous source forecast coverage. Disabled by default.",
+          "advanced_mode": "Reveals additional element types for complex energy systems."
+        },
         "sections": {
-          "advanced": { "data": { "advanced_mode": "Advanced Mode" }, "name": "Advanced settings" },
+          "advanced": {
+            "data": {
+              "adaptive_horizon_enabled": "Adaptive forecast horizon",
+              "advanced_mode": "Advanced Mode",
+              "minimum_effective_horizon_minutes": "Minimum effective horizon (minutes)",
+              "required_forecast_coverage_ratio": "Required forecast coverage ratio"
+            },
+            "name": "Advanced settings"
+          },
           "common": {
             "data": { "horizon_preset": "Planning Horizon", "name": "System Name" },
             "name": "Common settings"
@@ -53,20 +71,29 @@
         "title": "HAEO Settings",
         "description": "Configure optimization settings. Choose a planning horizon that matches your forecast data availability.",
         "data": {
+          "adaptive_horizon_enabled": "Adaptive forecast horizon",
           "advanced_mode": "Advanced Mode",
           "debounce_seconds": "Debounce Window (seconds)",
           "horizon_preset": "Planning Horizon",
+          "minimum_effective_horizon_minutes": "Minimum effective horizon (minutes)",
+          "required_forecast_coverage_ratio": "Required forecast coverage ratio",
           "record_forecasts": "Record forecast data"
         },
         "data_description": {
+          "adaptive_horizon_enabled": "Limits optimization to continuous source forecast coverage. Disabled by default.",
           "advanced_mode": "Reveals additional element types for complex energy systems.",
+          "minimum_effective_horizon_minutes": "Fails safely when continuous coverage is shorter than this duration.",
+          "required_forecast_coverage_ratio": "Minimum effective-to-configured horizon ratio required to optimize.",
           "record_forecasts": "When enabled, forecast attributes are saved to the recorder database. This significantly increases database size but allows debugging historical forecasts. Disabled by default to reduce database load."
         },
         "sections": {
           "advanced": {
             "data": {
+              "adaptive_horizon_enabled": "Adaptive forecast horizon",
               "advanced_mode": "Advanced Mode",
               "debounce_seconds": "Debounce Window (seconds)",
+              "minimum_effective_horizon_minutes": "Minimum effective horizon (minutes)",
+              "required_forecast_coverage_ratio": "Required forecast coverage ratio",
               "record_forecasts": "Record forecast data"
             },
             "name": "Advanced settings"
@@ -534,7 +561,12 @@
       "grid_power_max_export_price": { "name": "Max export power shadow price" },
       "grid_power_max_import_price": { "name": "Max import power shadow price" },
       "grid_revenue_export": { "name": "Export revenue" },
+      "configured_horizon_hours": { "name": "Configured horizon" },
+      "effective_horizon_hours": { "name": "Effective horizon" },
+      "forecast_coverage_ratio": { "name": "Forecast coverage" },
       "horizon": { "name": "Forecast horizon" },
+      "horizon_limit_reason": { "name": "Horizon limit reason" },
+      "horizon_limited": { "name": "Horizon limited" },
       "inverter_dc_bus_power_balance": { "name": "DC bus power balance shadow price" },
       "inverter_max_power_ac_to_dc_price": { "name": "Max AC to DC power shadow price" },
       "inverter_max_power_dc_to_ac_price": { "name": "Max DC to AC power shadow price" },
@@ -543,6 +575,8 @@
       "inverter_power_dc_to_ac": { "name": "DC to AC power" },
       "load_forecast_limit_price": { "name": "Forecast limit shadow price" },
       "load_power": { "name": "Power" },
+      "limiting_input": { "name": "Limiting input" },
+      "limiting_input_end_time": { "name": "Limiting input end time" },
       "network_optimization_cost": { "name": "Cost" },
       "network_optimization_duration": { "name": "Duration" },
       "network_optimization_status": { "name": "Status" },

@@ -34,5 +34,20 @@ class OptimizationContext:
     source_states: Mapping[str, EntityState]
     """Source sensor states captured when entities loaded data."""
 
+    configured_horizon_start: datetime | None = None
+    """Configured horizon start, when captured by an adaptive-aware caller."""
+
+    configured_horizon_end: datetime | None = None
+    """Configured horizon end before adaptive coverage limiting."""
+
+    effective_horizon_start: datetime | None = None
+    """Actual first boundary supplied to the optimization model."""
+
+    effective_horizon_end: datetime | None = None
+    """Actual final boundary supplied to the optimization model."""
+
+    effective_interval_count: int | None = None
+    """Actual number of intervals supplied to the optimization model."""
+
 
 __all__ = ["OptimizationContext"]

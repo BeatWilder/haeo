@@ -62,11 +62,14 @@ async def async_setup_entry(
     )
     entities: list[SensorEntity] = [horizon_entity]
 
-    # Create sensors for each output in the coordinator data grouped by element
-    if coordinator.data:
+    # Entity registration uses the stable inventory built from configured
+    # topology before the first refresh. Coordinator data supplies run values
+    # only and must not determine whether an entity exists.
+    output_inventory = coordinator.output_inventory
+    if output_inventory:
         for subentry in config_entry.subentries.values():
             # Get all devices under this subentry (may be multiple, e.g., battery regions)
-            subentry_devices = coordinator.data.outputs.get(subentry.title, {})
+            subentry_devices = output_inventory.get(subentry.title, {})
 
             # Pass subentry data as translation placeholders (convert all values to strings)
             translation_placeholders = {k: str(v) for k, v in subentry.data.items()}

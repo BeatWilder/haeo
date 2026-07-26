@@ -14,7 +14,12 @@ import numpy as np
 from custom_components.haeo.core.adapters.registry import is_element_type
 from custom_components.haeo.core.const import CONF_ELEMENT_TYPE, CONF_NAME
 from custom_components.haeo.core.data.util.forecast_combiner import combine_sensor_payloads
-from custom_components.haeo.core.data.util.forecast_fuser import fuse_to_boundaries, fuse_to_intervals
+from custom_components.haeo.core.data.util.forecast_fuser import (
+    fuse_to_boundaries,
+    fuse_to_boundaries_strict,
+    fuse_to_intervals,
+    fuse_to_intervals_strict,
+)
 from custom_components.haeo.core.model.const import OutputType
 from custom_components.haeo.core.schema import SchemaValue
 from custom_components.haeo.core.schema.constant_value import is_constant_value
@@ -232,6 +237,10 @@ def resolve_field(
     hint: FieldHint,
     sm: StateMachine,
     forecast_times: Sequence[float],
+    *,
+    strict_forecast: bool = False,
+    strict_single_interval: bool = False,
+    strict_interval_boundaries: Sequence[float] | None = None,
 ) -> _Sentinel | bool | float | np.ndarray | None:
     """Resolve a single field value based on its schema type and hint metadata.
 
@@ -262,7 +271,16 @@ def resolve_field(
     if not unwrapped:
         return None
 
-    return _resolve_entities(unwrapped, hint, sm, forecast_times, is_percent=is_percent)
+    return _resolve_entities(
+        unwrapped,
+        hint,
+        sm,
+        forecast_times,
+        is_percent=is_percent,
+        strict_forecast=strict_forecast,
+        strict_single_interval=strict_single_interval,
+        strict_interval_boundaries=strict_interval_boundaries,
+    )
 
 
 def is_percent_field(hint: FieldHint) -> bool:
@@ -310,6 +328,9 @@ def _resolve_entities(
     forecast_times: Sequence[float],
     *,
     is_percent: bool,
+    strict_forecast: bool = False,
+    strict_single_interval: bool = False,
+    strict_interval_boundaries: Sequence[float] | None = None,
 ) -> float | np.ndarray | None:
     """Load entity data from state machine and fuse to horizon."""
     payloads = load_sensors(sm, entity_ids)
@@ -325,9 +346,35 @@ def _resolve_entities(
         return scalar
 
     if hint.boundaries:
-        values = fuse_to_boundaries(present_value, forecast_series, list(forecast_times))
+        values = (
+            fuse_to_boundaries_strict(
+                present_value,
+                forecast_series,
+                list(forecast_times),
+            )
+            if strict_forecast
+            else fuse_to_boundaries(
+                present_value,
+                forecast_series,
+                list(forecast_times),
+            )
+        )
     else:
-        values = fuse_to_intervals(present_value, forecast_series, list(forecast_times))
+        values = (
+            fuse_to_intervals_strict(
+                present_value,
+                forecast_series,
+                list(forecast_times),
+                allow_single_interval=strict_single_interval,
+                interval_boundaries=strict_interval_boundaries,
+            )
+            if strict_forecast
+            else fuse_to_intervals(
+                present_value,
+                forecast_series,
+                list(forecast_times),
+            )
+        )
 
     if is_percent:
         values = [v / 100.0 for v in values]

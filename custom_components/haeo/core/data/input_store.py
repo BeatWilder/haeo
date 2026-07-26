@@ -23,8 +23,10 @@ from typing import Any
 
 import numpy as np
 
+from custom_components.haeo.core.data.forecast_coverage import CoverageIssue, ForecastInput, forecast_input_from_state
 from custom_components.haeo.core.data.loader.config_loader import is_percent_field, resolve_constant, resolve_field
 from custom_components.haeo.core.data.storage import Storage
+from custom_components.haeo.core.data.util.forecast_fuser import fuse_to_intervals_strict
 from custom_components.haeo.core.schema import as_entity_value
 from custom_components.haeo.core.schema.field_hints import FieldHint
 from custom_components.haeo.core.state import EntityState, StateMachine
@@ -186,6 +188,120 @@ class InputStore:
     def captured_source_states(self) -> dict[str, EntityState]:
         """Source states captured from the last data load."""
         return self._captured_source_states
+
+    @property
+    def required_forecasts(self) -> tuple[ForecastInput, ...]:
+        """Return entity-backed forecasts that constrain adaptive coverage."""
+        if self._mode is not InputMode.DRIVEN or not self._hint.time_series:
+            return ()
+        forecasts: list[ForecastInput] = []
+        for entity_id in self._source_entity_ids:
+            state = self._captured_source_states.get(entity_id)
+            if state is None:
+                forecasts.append(ForecastInput(entity_id, None, self._hint.boundaries))
+                continue
+            source = forecast_input_from_state(
+                state,
+                boundary_values=self._hint.boundaries,
+                expected_time_series=self._hint.time_series,
+            )
+            if not source.scalar:
+                # A non-scalar classification always carries either a valid
+                # forecast or a typed extraction failure. Never omit it.
+                if source.forecast is None:
+                    forecasts.append(
+                        ForecastInput(
+                            entity_id,
+                            None,
+                            self._hint.boundaries,
+                            CoverageIssue.UNSUPPORTED_STRUCTURE,
+                        )
+                    )
+                else:
+                    forecasts.append(source.forecast)
+        return tuple(forecasts)
+
+    def resolve_for_horizon(self, forecast_timestamps: tuple[float, ...]) -> bool:
+        """Strictly re-resolve this store for an effective adaptive horizon."""
+        if self._mode is InputMode.EDITABLE:
+            if self._constant is None:
+                return False
+            self._value = resolve_constant(self._constant, self._hint, list(forecast_timestamps))
+            self._loaded_timestamps = forecast_timestamps if self._hint.time_series else ()
+            self._available = True
+            return True
+
+        class CapturedStateMachine:
+            def __init__(self, states: dict[str, EntityState]) -> None:
+                self._states = states
+
+            def get(self, entity_id: str) -> EntityState | None:
+                return self._states.get(entity_id)
+
+        required_forecasts = self.required_forecasts
+        explicit_forecasts = [
+            forecast
+            for forecast in required_forecasts
+            if not forecast.boundary_values and forecast.interval_boundaries is not None
+        ]
+        strict_interval_boundaries: tuple[float, ...] | None = None
+        if explicit_forecasts:
+            first_boundaries = explicit_forecasts[0].interval_boundaries
+            if (
+                len(explicit_forecasts) != sum(not forecast.boundary_values for forecast in required_forecasts)
+                or first_boundaries is None
+                or any(forecast.interval_boundaries != first_boundaries for forecast in explicit_forecasts[1:])
+            ):
+                return False
+            strict_interval_boundaries = first_boundaries
+            combined_series = [
+                (
+                    float(first_boundaries[index]),
+                    sum(float((forecast.series or ())[index][1]) for forecast in explicit_forecasts),
+                )
+                for index in range(len(first_boundaries) - 1)
+            ]
+            try:
+                resolved_values = fuse_to_intervals_strict(
+                    None,
+                    combined_series,
+                    forecast_timestamps,
+                    interval_boundaries=first_boundaries,
+                )
+            except (TypeError, ValueError):
+                return False
+            resolved_array = np.asarray(resolved_values, dtype=float)
+            if self.is_percent:
+                resolved_array /= 100.0
+            if self._negate:
+                resolved_array = -resolved_array
+            self._value = resolved_array
+            self._loaded_timestamps = forecast_timestamps
+            self._available = True
+            return True
+        try:
+            resolved = resolve_field(
+                as_entity_value(self._source_entity_ids),
+                self._hint,
+                CapturedStateMachine(self._captured_source_states),
+                list(forecast_timestamps),
+                strict_forecast=bool(required_forecasts),
+                strict_single_interval=any(
+                    forecast.interval_boundaries is not None and len(forecast.series or ()) == 1
+                    for forecast in required_forecasts
+                ),
+                strict_interval_boundaries=strict_interval_boundaries,
+            )
+        except (TypeError, ValueError):
+            return False
+        if resolved is None or not isinstance(resolved, (bool, float, int, np.ndarray)):
+            return False
+        if self._negate and not isinstance(resolved, bool):
+            resolved = -resolved
+        self._value = resolved
+        self._loaded_timestamps = forecast_timestamps if self._hint.time_series else ()
+        self._available = True
+        return True
 
     def capture_state(self, entity_id: str, state: EntityState) -> None:
         """Capture a single source entity state (e.g., from a state change event)."""

@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Any, Literal, cast
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 from homeassistant.config_entries import ConfigSubentry
@@ -80,6 +80,7 @@ def _create_mock_coordinator() -> Mock:
     """
     coordinator = Mock()
     coordinator.data = _make_coordinator_data({})
+    coordinator.output_inventory = {}
     coordinator.last_update_success = True
     coordinator.async_add_listener = Mock(return_value=lambda: None)
     return coordinator
@@ -240,6 +241,7 @@ async def test_async_setup_entry_creates_sensors_with_metadata(
             },
         }
     )
+    coordinator.output_inventory = coordinator.data.outputs
     config_entry.runtime_data = _create_mock_runtime_data(coordinator)
 
     async_add_entities = Mock()
@@ -265,6 +267,68 @@ async def test_async_setup_entry_creates_sensors_with_metadata(
     assert power_sensor.native_unit_of_measurement == "kW"
     assert power_sensor.device_class is SensorDeviceClass.POWER
     assert power_sensor.state_class is SensorStateClass.MEASUREMENT
+
+
+async def test_plan_entity_recovers_after_initial_adaptive_failure(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+) -> None:
+    """Stable inventory survives failure, success, and later failure without reload."""
+    coordinator = _create_mock_coordinator()
+    unavailable_plan = _make_output(
+        type_=OutputType.POWER,
+        unit="kW",
+        state=None,
+        forecast=None,
+        entity_category=None,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        options=None,
+    )
+    coordinator.output_inventory = {"Battery": {"Battery": {LOAD_POWER: unavailable_plan}}}
+    # The failed run itself has no participant outputs. Registration must not
+    # depend on this transient result.
+    coordinator.data = _make_coordinator_data({})
+    config_entry.runtime_data = _create_mock_runtime_data(coordinator)
+    async_add_entities = Mock()
+
+    await async_setup_entry(hass, config_entry, async_add_entities)
+    sensors = list(async_add_entities.call_args.args[0])
+    plan_sensor = next(sensor for sensor in sensors if sensor.translation_key == LOAD_POWER)
+    unique_ids = [sensor.unique_id for sensor in sensors]
+    assert len(unique_ids) == len(set(unique_ids))
+    plan_sensor.async_write_ha_state = Mock()
+    assert plan_sensor.native_value is None
+
+    available_plan = _make_output(
+        type_=OutputType.POWER,
+        unit="kW",
+        state=2.5,
+        forecast=None,
+        entity_category=None,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        options=None,
+    )
+    repaired_data = _make_coordinator_data({"Battery": {"Battery": {LOAD_POWER: available_plan}}})
+    failed_again_data = _make_coordinator_data({"Battery": {"Battery": {LOAD_POWER: unavailable_plan}}})
+
+    refresh_results = iter((repaired_data, failed_again_data))
+
+    async def refresh() -> None:
+        coordinator.data = next(refresh_results)
+
+    coordinator.async_refresh = AsyncMock(side_effect=refresh)
+
+    await coordinator.async_refresh()
+    plan_sensor._handle_coordinator_update()
+    assert plan_sensor.native_value == 2.5
+
+    await coordinator.async_refresh()
+    plan_sensor._handle_coordinator_update()
+    assert plan_sensor.native_value is None
+    async_add_entities.assert_called_once()
+    assert coordinator.async_refresh.await_count == 2
 
 
 async def test_async_setup_entry_raises_when_runtime_data_missing(
@@ -558,6 +622,7 @@ async def test_async_setup_entry_creates_sub_device_sensors(
             },
         }
     )
+    coordinator.output_inventory = coordinator.data.outputs
     config_entry.runtime_data = _create_mock_runtime_data(coordinator)
 
     async_add_entities = Mock()
