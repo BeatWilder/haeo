@@ -113,6 +113,110 @@ def test_stale_forecast() -> None:
     assert result.usable_end is None
 
 
+def test_present_value_seeds_exactly_one_leading_interval() -> None:
+    """A live scalar bridges only the gap to the first forecast boundary."""
+    first_forecast = START + timedelta(minutes=15)
+    required = tuple((START + timedelta(minutes=15 * index)).timestamp() for index in range(5))
+    forecast = ForecastInput(
+        "sensor.load",
+        _series(6, start=first_forecast),
+        present_value=817.0,
+    )
+
+    result = inspect_forecast(
+        forecast,
+        horizon_start=START,
+        horizon_end=END,
+        required_timestamps=required,
+    )
+
+    assert result.usable_end == first_forecast + timedelta(hours=6)
+    assert result.issue is CoverageIssue.EARLY_END
+
+
+def test_present_value_does_not_seed_more_than_one_leading_interval() -> None:
+    """A live scalar is not treated as an open-ended forecast."""
+    required = tuple((START + timedelta(minutes=15 * index)).timestamp() for index in range(5))
+    forecast = ForecastInput(
+        "sensor.load",
+        _series(6, start=START + timedelta(minutes=30)),
+        present_value=817.0,
+    )
+
+    result = inspect_forecast(
+        forecast,
+        horizon_start=START,
+        horizon_end=END,
+        required_timestamps=required,
+    )
+
+    assert result.usable_end is None
+    assert result.issue is CoverageIssue.DOES_NOT_COVER_START
+
+
+def test_present_value_cannot_bridge_internal_gap_or_extend_final_end() -> None:
+    """A current scalar affects neither an internal gap nor the natural source end."""
+    gapped = _series(4)
+    gapped.extend(_series(3, start=START + timedelta(hours=6)))
+    gap_result = inspect_forecast(
+        ForecastInput("sensor.load", gapped, present_value=817.0),
+        horizon_start=START,
+        horizon_end=END,
+    )
+    assert gap_result.usable_end == START + timedelta(hours=4)
+    assert gap_result.issue is CoverageIssue.INTERNAL_GAP
+
+    ending_result = inspect_forecast(
+        ForecastInput("sensor.load", _series(6), present_value=817.0),
+        horizon_start=START,
+        horizon_end=END,
+    )
+    assert ending_result.usable_end == START + timedelta(hours=6)
+    assert ending_result.issue is CoverageIssue.EARLY_END
+
+
+def test_seeded_load_leaves_authoritative_price_boundary_as_limit() -> None:
+    """A one-interval load seed must not collapse or extend the effective horizon."""
+    amsterdam = ZoneInfo("Europe/Amsterdam")
+    planning_start = datetime(2026, 7, 26, 12, 15, tzinfo=amsterdam)
+    price_end = datetime(2026, 7, 27, 0, 0, tzinfo=amsterdam)
+    configured_end = datetime(2026, 7, 28, 12, 0, tzinfo=amsterdam)
+    required = tuple(
+        (planning_start + timedelta(minutes=15 * index)).timestamp()
+        for index in range(int((configured_end - planning_start) / timedelta(minutes=15)) + 1)
+    )
+    load_start = planning_start + timedelta(minutes=15)
+    load = ForecastInput(
+        "sensor.load",
+        tuple(((load_start + timedelta(minutes=5 * index)).timestamp(), 817.0 + index) for index in range(335)),
+        present_value=817.0,
+    )
+    pv = ForecastInput(
+        "sensor.pv",
+        tuple(((planning_start + timedelta(minutes=5 * index)).timestamp(), 100.0) for index in range(393)),
+    )
+    price_boundaries = tuple(
+        (planning_start + timedelta(minutes=15 * index)).timestamp()
+        for index in range(int((price_end - planning_start) / timedelta(minutes=15)) + 1)
+    )
+    price = ForecastInput(
+        "sensor.import_price",
+        tuple((timestamp, 0.25) for timestamp in price_boundaries[:-1]),
+        interval_boundaries=price_boundaries,
+    )
+
+    result = calculate_effective_horizon(
+        [load, pv, price],
+        configured_start=planning_start,
+        configured_end=configured_end,
+        required_timestamps=required,
+    )
+
+    assert result.effective_end == price_end
+    assert result.effective_end - result.configured_start == timedelta(hours=11, minutes=45)
+    assert result.limiting_input == "sensor.import_price"
+
+
 def test_internal_gap_limits_continuous_coverage() -> None:
     """Coverage ends before a gap and never resumes after it."""
     series = _series(4)
@@ -220,6 +324,42 @@ def test_required_numeric_state_without_forecast_attribute_is_missing() -> None:
     assert not source.scalar
     assert source.forecast is not None
     assert source.forecast.extraction_issue is CoverageIssue.MISSING_FORECAST_ATTRIBUTE
+
+
+@pytest.mark.parametrize("state_value", ["unknown", "unavailable", "not-a-number", "nan"])
+def test_invalid_present_state_cannot_seed_leading_interval(state_value: str) -> None:
+    """Only a finite numeric current state may bridge the leading interval."""
+    first_forecast = START + timedelta(minutes=15)
+    state = _State(
+        "sensor.load",
+        state_value,
+        {
+            "forecast": [
+                {
+                    "time": (first_forecast + index * STEP).isoformat(),
+                    "value": float(index),
+                }
+                for index in range(6)
+            ]
+        },
+    )
+    source = forecast_input_from_state(
+        state,
+        boundary_values=False,
+        expected_time_series=True,
+    )
+    assert source.forecast is not None
+    assert source.forecast.present_value is None
+
+    result = inspect_forecast(
+        source.forecast,
+        horizon_start=START,
+        horizon_end=END,
+        required_timestamps=(START.timestamp(), first_forecast.timestamp()),
+    )
+
+    assert result.usable_end is None
+    assert result.issue is CoverageIssue.DOES_NOT_COVER_START
 
 
 def _nordpool_entry(start: datetime, end: datetime, value: object) -> dict[str, object]:

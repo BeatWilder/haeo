@@ -46,10 +46,11 @@ def _build_strict_block(
     *,
     interval_starts: bool = False,
     allow_single_interval: bool = False,
+    allow_leading_present_interval: bool = False,
 ) -> NDArray[Any]:
     """Build a source block only when it naturally covers the horizon."""
     block = np.array(forecast_series, dtype=[("timestamp", np.float64), ("value", np.float64)])
-    if block.size == 0 or block[0]["timestamp"] > horizon_start:
+    if block.size == 0 or (block[0]["timestamp"] > horizon_start and not allow_leading_present_interval):
         msg = "Forecast does not continuously cover the requested horizon"
         raise ValueError(msg)
     if block.size == 1:
@@ -272,6 +273,9 @@ def fuse_to_intervals_strict(
         horizon_times[-1],
         interval_starts=True,
         allow_single_interval=allow_single_interval,
+        allow_leading_present_interval=(
+            present_value is not None and bool(np.isclose(forecast_series[0][0], horizon_times[1], rtol=0.0, atol=1e-6))
+        ),
     )
     result: list[float] = []
     for interval_start, interval_end in pairwise(horizon_times):

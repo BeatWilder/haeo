@@ -639,6 +639,39 @@ async def test_adaptive_horizon_minimum_is_inclusive(
             assert result.effective_end == start + timedelta(hours=6)
 
 
+async def test_required_coverage_ratio_one_remains_strict(
+    hass: HomeAssistant,
+    mock_hub_entry: MockConfigEntry,
+    mock_runtime_data: HaeoRuntimeData,
+) -> None:
+    """Any early-ending required input fails when the required ratio is one."""
+    mock_hub_entry.data[HUB_SECTION_ADVANCED].update(
+        {
+            CONF_ADAPTIVE_HORIZON_ENABLED: True,
+            CONF_MINIMUM_EFFECTIVE_HORIZON_MINUTES: 0,
+            CONF_REQUIRED_FORECAST_COVERAGE_RATIO: 1.0,
+        }
+    )
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    configured = tuple((start + timedelta(hours=index)).timestamp() for index in range(7))
+    store = MagicMock()
+    store.required_forecasts = (
+        ForecastInput(
+            "sensor.required",
+            tuple(((start + timedelta(hours=index)).timestamp(), float(index)) for index in range(5)),
+        ),
+    )
+    mock_runtime_data.input_stores = {("Load", ("forecast",)): store}
+    coordinator = HaeoDataUpdateCoordinator(hass, mock_hub_entry)
+
+    with pytest.raises(
+        AdaptiveHorizonError,
+        match=CoverageIssue.INSUFFICIENT_COVERAGE.value,
+    ):
+        await coordinator._prepare_adaptive_horizon(configured)
+    store.resolve_for_horizon.assert_not_called()
+
+
 async def test_sparse_forecast_fails_below_minimum_horizon(
     hass: HomeAssistant,
     mock_hub_entry: MockConfigEntry,

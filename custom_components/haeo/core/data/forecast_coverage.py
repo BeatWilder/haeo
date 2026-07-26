@@ -54,6 +54,7 @@ class ForecastInput:
     extraction_issue: CoverageIssue | None = None
     interval_boundaries: tuple[float, ...] | None = None
     detail: str | None = None
+    present_value: float | None = None
 
     @property
     def semantics(self) -> ForecastTimestampSemantics:
@@ -239,7 +240,18 @@ def inspect_forecast(
 
     start_ts = start.timestamp()
     end_ts = end.timestamp()
-    if timestamps[0] > start_ts or timestamps[-1] < start_ts:
+    starts_after_horizon = timestamps[0] > start_ts
+    leading_interval_is_seeded = (
+        starts_after_horizon
+        and forecast.present_value is not None
+        and not forecast.boundary_values
+        and forecast.interval_boundaries is None
+        and required_timestamps is not None
+        and len(required_timestamps) >= _MIN_BOUNDARY_VALUES
+        and _same_timestamp(required_timestamps[0], start_ts)
+        and _same_timestamp(required_timestamps[1], timestamps[0])
+    )
+    if (starts_after_horizon and not leading_interval_is_seeded) or timestamps[-1] < start_ts:
         return ForecastCoverage(forecast.entity_id, None, CoverageIssue.DOES_NOT_COVER_START)
 
     if forecast.boundary_values:
@@ -367,6 +379,10 @@ def forecast_input_from_state(
         return ForecastSource(entity_id=state.entity_id, scalar=True, forecast=None)
 
     raw = _find_raw_forecast(state)
+    try:
+        present_value = _parse_value(state.state)
+    except (TypeError, ValueError):
+        present_value = None
     if isinstance(raw, CoverageIssue):
         return ForecastSource(
             entity_id=state.entity_id,
@@ -431,6 +447,7 @@ def forecast_input_from_state(
                 tuple(raw_series),
                 boundary_values,
                 interval_boundaries=interval_boundaries,
+                present_value=present_value,
             ),
         )
 

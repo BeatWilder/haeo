@@ -284,6 +284,21 @@ def test_strict_fusion_refuses_to_repeat_short_forecast() -> None:
         fuse_to_intervals_strict(None, series, [0.0, 3600.0, 7200.0, 10800.0])
 
 
+def test_strict_fusion_seeds_one_leading_interval_from_present_value() -> None:
+    """The current scalar covers only the interval before the first forecast."""
+    series = [(900.0, 1.0), (1800.0, 2.0), (2700.0, 3.0)]
+
+    assert fuse_to_intervals_strict(817.0, series, [0.0, 900.0, 1800.0, 2700.0, 3600.0]) == [
+        817.0,
+        1.5,
+        2.5,
+        3.0,
+    ]
+
+    with pytest.raises(ValueError, match="continuously cover"):
+        fuse_to_intervals_strict(817.0, series, [0.0, 450.0, 900.0, 1800.0])
+
+
 def test_strict_single_interval_requires_explicit_validation() -> None:
     """A one-point source is accepted only after coverage validated its end."""
     series = [(0.0, 2.0)]
